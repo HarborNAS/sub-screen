@@ -77,48 +77,48 @@ int main(void) {
 
 
     while (true) {
-        // Request* request = (Request *)hid_report;
-        // //Time
-        // int timereportsize = init_hidreport(request, SET, TIME_AIM);
-        // append_crc(request);
-        // if (hid_write(handle, hid_report, timereportsize) == -1) {
+        Request* request = (Request *)hid_report;
+        //Time
+        int timereportsize = init_hidreport(request, SET, TIME_AIM);
+        append_crc(request);
+        if (hid_write(handle, hid_report, timereportsize) == -1) {
+            break;
+        }
+        // if (hid_read(handle, hid_report, 0x40) == -1) {
         //     break;
         // }
+        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        sleep(1);
+        // //CPU
+        int cpureportsize = init_hidreport(request, SET, CPU_AIM);
+        append_crc(request);
+        if (hid_write(handle, hid_report, cpureportsize) == -1) {
+            break;
+        }
+
         // // if (hid_read(handle, hid_report, 0x40) == -1) {
         // //     break;
         // // }
-        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        // sleep(1);
-        // // //CPU
-        // int cpureportsize = init_hidreport(request, SET, CPU_AIM);
-        // append_crc(request);
-        // if (hid_write(handle, hid_report, cpureportsize) == -1) {
-        //     break;
-        // }
+        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        sleep(1);
+        // //Memory Usage
+        int memusagesize = init_hidreport(request, SET, MEMORY_AIM);
+        append_crc(request);
+        if (hid_write(handle, hid_report, memusagesize) == -1) {
+            break;
+        }
 
-        // // // if (hid_read(handle, hid_report, 0x40) == -1) {
-        // // //     break;
-        // // // }
-        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        // sleep(1);
-        // // //Memory Usage
-        // int memusagesize = init_hidreport(request, SET, MEMORY_AIM);
-        // append_crc(request);
-        // if (hid_write(handle, hid_report, memusagesize) == -1) {
-        //     break;
-        // }
+        int result = hid_read_timeout(handle, ack, 0x40, -1);
+        if (result == -1) {
+            break;
+        }
 
-        // int result = hid_read_timeout(handle, ack, 0x40, -1);
-        // if (result == -1) {
-        //     break;
-        // }
+        if (result > 0) {
+            parse_ack((Ack *)ack, request->aim);
+        }
 
-        // if (result > 0) {
-        //     parse_ack((Ack *)ack, request->aim);
-        // }
-
-        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        // memset(ack, 0x0, sizeof(unsigned char) * 0x40);
+        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        memset(ack, 0x0, sizeof(unsigned char) * 0x40);
 
 
 
