@@ -11,6 +11,7 @@
 #include <sys/statvfs.h>
 #include <mntent.h>
 #include <dirent.h>
+#include <utmp.h>
 #define MAXLEN 0x40
 #define PRODUCTID 0x0002
 #define VENDORID 0x5448
@@ -56,6 +57,8 @@ void print_modify_disk_size(unsigned long long bytes);
 
 
 CPUData prev_data, curr_data;
+struct utmp *ut;
+
 int main(void) {
     int res = hid_init();
     hid_device *handle = hid_open(VENDORID, PRODUCTID, NULL);
@@ -74,7 +77,8 @@ int main(void) {
     unsigned long long disk_total_capacity = 0;
     unsigned long long disk_total_free = 0;
     unsigned long long disk_total_used = 0;
-
+    
+    
 
     while (true) {
         Request* request = (Request *)hid_report;
@@ -89,6 +93,7 @@ int main(void) {
         // }
         memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
         sleep(1);
+        //*****************************************************/
         // //CPU
         int cpureportsize = init_hidreport(request, SET, CPU_AIM);
         append_crc(request);
@@ -101,13 +106,26 @@ int main(void) {
         // // }
         memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
         sleep(1);
+        //*****************************************************/
         // //Memory Usage
         int memusagesize = init_hidreport(request, SET, MEMORY_AIM);
         append_crc(request);
         if (hid_write(handle, hid_report, memusagesize) == -1) {
             break;
         }
-
+        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        sleep(1);
+        //*****************************************************/
+        //User Online
+        int usersize = init_hidreport(request, SET, USER_AIM);
+        append_crc(request);
+        if (hid_write(handle, hid_report, usersize) == -1) {
+            break;
+        }
+        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        sleep(1);
+        //*****************************************************/
+        //Get Error
         int result = hid_read_timeout(handle, ack, 0x40, -1);
         if (result == -1) {
             break;
@@ -119,10 +137,7 @@ int main(void) {
 
         memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
         memset(ack, 0x0, sizeof(unsigned char) * 0x40);
-
-
-
-
+        //*****************************************************/
         //dynamic read diskcount
         disk_count = get_all_disk_info(&disks);
         if (disk_count <= 0) {
@@ -146,13 +161,16 @@ int main(void) {
         } else {
             printf("状态: 未挂载\n");
         }
-    
+        
+        //*****************************************************/
     }
         sleep(DURATION);
     }
-
+    // 释放内存
+    free(disks);
     hid_close(handle);
     res = hid_exit();
+
     return 0;
 }
 
@@ -189,7 +207,21 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim) {
     case USER_AIM:
         request->length += sizeof(request->user_data);
         // Code
-
+        // 打开 utmp 文件
+        setutent();
+        //Clear count
+        int user_count = 0;
+        // 遍历所有记录
+        while ((ut = getutent()) != NULL) {
+            // USER_PROCESS 表示活跃的用户登录会话
+            if (ut->ut_type == USER_PROCESS) {
+                user_count++;
+            }
+        }
+        // 关闭文件
+        endutent();
+        printf("User Online Count:%d/n",user_count);
+        request->user_data.user_info.online = user_count;
         return offsetof(Request, user_data.crc) + 1;
     case MEMORY_AIM:
         request->length += sizeof(request->memory_data);
