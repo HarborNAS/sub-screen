@@ -1,0 +1,1 @@
+gcc -fdiagnostics-color=always -g /home/jarvan/Repository/cyberize/panel.c -o /home/jarvan/Repository/cyberize/panel -lhidapi-libusb -lhidapi-hidraw
