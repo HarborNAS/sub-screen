@@ -12,10 +12,34 @@
 #include <mntent.h>
 #include <dirent.h>
 #include <utmp.h>
+
+#include <sys/io.h>
+#include <fcntl.h>
+#include <errno.h>
+
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <stdint.h>
+
+#define APIC_ADDRESS 0xFEC00000
+#define APIC_IRQ 0x09
+
+
 #define MAXLEN 0x40
 #define PRODUCTID 0x0002
 #define VENDORID 0x5448
 #define DURATION 1
+
+// ITE
+#define ITE_EC_DATA_PORT    0x62
+#define ITE_EC_INDEX_PORT   0x66
+#define ITE_EC_CMD_PORT     0x66
+
+// EC RAM
+#define EC_CMD_READ_RAM     0x80    //Test for read CPUTemp
+#define EC_CMD_WRITE_RAM    0x81
+#define EC_CMD_QUERY        0x84
 // CPU使用率计算结构体
 typedef struct {
     unsigned long user;
@@ -54,8 +78,31 @@ int get_mountpoint_usage(const char *mountpoint, unsigned long long *total,
                         unsigned long long *free, unsigned long long *used);
 int get_all_disk_info(DiskInfo **disks);
 void print_modify_disk_size(unsigned long long bytes);
-
-
+//EC6266
+int acquire_io_permissions();
+void release_io_permissions();
+int ec_wait_ready();
+void ec_write_index(unsigned char index);
+void ec_write_data(unsigned char data);
+unsigned char ec_read_data();
+int ec_ram_read_byte(unsigned char address, unsigned char *value);
+int ec_ram_write_byte(unsigned char address, unsigned char value);
+int ec_ram_read_block(unsigned char start_addr, unsigned char *buffer, int length);
+int ec_ram_write_block(unsigned char start_addr, unsigned char *data, int length);
+int ec_query_version(char *version, int max_len);
+int ec_check_alive();
+void print_ec_status();
+void diagnose_ec_issue();
+volatile uint32_t* map_apic_memory();
+void unmap_apic_memory(volatile uint32_t* addr);
+uint32_t RMem32(volatile uint32_t* base, uint32_t offset);
+void WMem32(volatile uint32_t* base, uint32_t offset, uint32_t value);
+int DisableSci();
+int EnableSci();
+volatile uint32_t* map_physical_memory(uint64_t phys_addr, size_t size);
+void unmap_physical_memory(volatile uint32_t* addr, size_t size);
+void scan_ec_ports();
+int try_alternative_protocols(unsigned char address, unsigned char *value);
 CPUData prev_data, curr_data;
 struct utmp *ut;
 
@@ -78,92 +125,133 @@ int main(void) {
     unsigned long long disk_total_free = 0;
     unsigned long long disk_total_used = 0;
     
-    
+    try_alternative_protocols(0xA0,hid_report);
 
-    while (true) {
-        Request* request = (Request *)hid_report;
-        //Time
-        int timereportsize = init_hidreport(request, SET, TIME_AIM);
-        append_crc(request);
-        if (hid_write(handle, hid_report, timereportsize) == -1) {
-            break;
+
+
+        //Disable SCI
+        volatile uint32_t* apic_base = map_apic_memory();
+        if (!apic_base) {
+            return 1;
         }
-        // if (hid_read(handle, hid_report, 0x40) == -1) {
+        uint32_t v = (2 * APIC_IRQ) + 0x10;
+        uint32_t sci_reg = RMem32(apic_base, 0x10);
+        
+        //printf("APIC基地址: 0x%p\n", (void*)APIC_ADDRESS);
+        //printf("IRQ: %d\n", APIC_IRQ);
+        //printf("当前SCI寄存器值: 0x%08X\n", sci_reg);
+        // printf("屏蔽位状态: %s\n", (sci_reg & 0x00010000) ? "已屏蔽" : "未屏蔽");
+        // DisableSci();
+        // sci_reg = RMem32(apic_base, 0x10);
+        // printf("屏蔽位状态: %s\n", (sci_reg & 0x00010000) ? "已屏蔽" : "未屏蔽");
+        scan_ec_ports();
+        //EnableSci();
+        //unmap_apic_memory(apic_base);
+    while (true) {
+        // Request* request = (Request *)hid_report;
+        // //Time
+        // int timereportsize = init_hidreport(request, SET, TIME_AIM);
+        // append_crc(request);
+        // if (hid_write(handle, hid_report, timereportsize) == -1) {
         //     break;
         // }
-        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        sleep(1);
-        //*****************************************************/
-        // //CPU
-        int cpureportsize = init_hidreport(request, SET, CPU_AIM);
-        append_crc(request);
-        if (hid_write(handle, hid_report, cpureportsize) == -1) {
-            break;
-        }
-
         // // if (hid_read(handle, hid_report, 0x40) == -1) {
         // //     break;
         // // }
-        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        sleep(1);
-        //*****************************************************/
-        // //Memory Usage
-        int memusagesize = init_hidreport(request, SET, MEMORY_AIM);
-        append_crc(request);
-        if (hid_write(handle, hid_report, memusagesize) == -1) {
-            break;
-        }
-        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        sleep(1);
-        //*****************************************************/
-        //User Online
-        int usersize = init_hidreport(request, SET, USER_AIM);
-        append_crc(request);
-        if (hid_write(handle, hid_report, usersize) == -1) {
-            break;
-        }
-        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        sleep(1);
-        //*****************************************************/
-        //Get Error
-        int result = hid_read_timeout(handle, ack, 0x40, -1);
-        if (result == -1) {
-            break;
-        }
+        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        // sleep(1);
+        // //*****************************************************/
+        // // //CPU
+        // int cpureportsize = init_hidreport(request, SET, CPU_AIM);
+        // append_crc(request);
+        // if (hid_write(handle, hid_report, cpureportsize) == -1) {
+        //     break;
+        // }
 
-        if (result > 0) {
-            parse_ack((Ack *)ack, request->aim);
-        }
+        // // // if (hid_read(handle, hid_report, 0x40) == -1) {
+        // // //     break;
+        // // // }
+        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        // sleep(1);
+        // //*****************************************************/
+        // // //Memory Usage
+        // int memusagesize = init_hidreport(request, SET, MEMORY_AIM);
+        // append_crc(request);
+        // if (hid_write(handle, hid_report, memusagesize) == -1) {
+        //     break;
+        // }
+        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        // sleep(1);
+        // //*****************************************************/
+        // //User Online
+        // int usersize = init_hidreport(request, SET, USER_AIM);
+        // append_crc(request);
+        // if (hid_write(handle, hid_report, usersize) == -1) {
+        //     break;
+        // }
+        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        // sleep(1);
+        // //*****************************************************/
+        // //Get Error
+        // int result = hid_read_timeout(handle, ack, 0x40, -1);
+        // if (result == -1) {
+        //     break;
+        // }
 
-        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        memset(ack, 0x0, sizeof(unsigned char) * 0x40);
-        //*****************************************************/
-        //dynamic read diskcount
-        disk_count = get_all_disk_info(&disks);
-        if (disk_count <= 0) {
-            printf("未找到物理磁盘设备\n");
-            return 1;
-        }
-        for (int i = 0; i < disk_count; i++) {
-        printf("磁盘 %d: %s\n", i + 1, disks[i].device);
-        printf("总容量: ");
-        print_modify_disk_size(disks[i].total_size);
-        printf("\n");
+        // if (result > 0) {
+        //     parse_ack((Ack *)ack, request->aim);
+        // }
+
+        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        // memset(ack, 0x0, sizeof(unsigned char) * 0x40);
+        // //*****************************************************/
+        // //dynamic read diskcount
+        // disk_count = get_all_disk_info(&disks);
+        // if (disk_count <= 0) {
+        //     printf("未找到物理磁盘设备\n");
+        //     return 1;
+        // }
+        // for (int i = 0; i < disk_count; i++) {
+        // printf("磁盘 %d: %s\n", i + 1, disks[i].device);
+        // printf("总容量: ");
+        // print_modify_disk_size(disks[i].total_size);
+        // printf("\n");
         
-        if (strlen(disks[i].mountpoint) > 0) {
-            printf("可用容量: ");
-            print_modify_disk_size(disks[i].free_size);
-            printf("\n");
-            printf("已用容量: ");
-            print_modify_disk_size(disks[i].used_size);
-            printf("\n");
-            printf("使用率: %.1f%%\n", disks[i].usage_percent);
-        } else {
-            printf("状态: 未挂载\n");
-        }
+        // if (strlen(disks[i].mountpoint) > 0) {
+        //     printf("可用容量: ");
+        //     print_modify_disk_size(disks[i].free_size);
+        //     printf("\n");
+        //     printf("已用容量: ");
+        //     print_modify_disk_size(disks[i].used_size);
+        //     printf("\n");
+        //     printf("使用率: %.1f%%\n", disks[i].usage_percent);
+        // } else {
+        //     printf("状态: 未挂载\n");
+        // }
         
         //*****************************************************/
-    }
+        
+        
+        
+        //scan_ec_ports();
+        // // 获取 I/O 权限
+        // unsigned char address,value;
+        // address = 0xA0;
+        // if (acquire_io_permissions() < 0) {
+        //     fprintf(stderr, "需要 root 权限运行此程序\n");
+        //     return 1;
+        // }
+        // print_ec_status();
+        //     int result = 0;
+        // if (ec_ram_read_byte(address, &value) == 0) {
+        //     printf("Address 0x%02X: 0x%02X (%d)\n", address, value, value);
+        // } else {
+        //     fprintf(stderr, "Failed to read address 0x%02X\n", address);
+        //     result = 1;
+        // }
+        // // 释放 I/O 权限
+        // release_io_permissions();
+        
         sleep(DURATION);
     }
     // 释放内存
@@ -577,4 +665,364 @@ void print_modify_disk_size(unsigned long long bytes) {
     }
     
     printf("%.1f %s", size, units[unit_index]);
+}
+//6266 CMD
+// 获取 I/O 端口权限
+int acquire_io_permissions() {
+    if (iopl(3) < 0) {
+        perror("iopl failed");
+        return -1;
+    }
+    
+    // 也可以使用 ioperm 获取特定端口的权限
+    if (ioperm(ITE_EC_INDEX_PORT, 2, 1) < 0) {
+        perror("ioperm failed");
+        return -1;
+    }
+    
+    return 0;
+}
+
+// 释放 I/O 端口权限
+void release_io_permissions() {
+    ioperm(ITE_EC_INDEX_PORT, 2, 0);
+    iopl(0);
+}
+// 等待 EC 就绪
+int ec_wait_ready() {
+    int timeout = 1000; // 超时时间
+    unsigned char status;
+    
+    while (timeout--) {
+        status = inb(ITE_EC_CMD_PORT);
+        if (!(status & 0x02)) { // 检查忙标志位
+            return 0;
+        }
+        usleep(100); // 等待 100μs
+    }
+    
+    fprintf(stderr, "EC timeout waiting for ready\n");
+    return -1;
+}
+
+// 写入 EC 索引
+void ec_write_index(unsigned char index) {
+    outb(index, ITE_EC_INDEX_PORT);
+}
+
+// 写入 EC 数据
+void ec_write_data(unsigned char data) {
+    outb(data, ITE_EC_DATA_PORT);
+}
+
+// 读取 EC 数据
+unsigned char ec_read_data() {
+    return inb(ITE_EC_DATA_PORT);
+}
+// 读取 EC RAM 字节
+int ec_ram_read_byte(unsigned char address, unsigned char *value) {
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    
+    // 发送读取命令和地址
+    ec_write_index(EC_CMD_READ_RAM);
+    ec_write_data(address);
+    
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    
+    // 读取数据
+    *value = ec_read_data();
+    return 0;
+}
+
+// 写入 EC RAM 字节
+int ec_ram_write_byte(unsigned char address, unsigned char value) {
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    
+    // 发送写入命令、地址和数据
+    ec_write_index(EC_CMD_WRITE_RAM);
+    ec_write_data(address);
+    ec_write_data(value);
+    
+    return ec_wait_ready();
+}
+
+// 读取 EC RAM 区域
+int ec_ram_read_block(unsigned char start_addr, unsigned char *buffer, int length) {
+    for (int i = 0; i < length; i++) {
+        if (ec_ram_read_byte(start_addr + i, &buffer[i]) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// 写入 EC RAM 区域
+int ec_ram_write_block(unsigned char start_addr, unsigned char *data, int length) {
+    for (int i = 0; i < length; i++) {
+        if (ec_ram_write_byte(start_addr + i, data[i]) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+// 查询 EC 版本信息
+int ec_query_version(char *version, int max_len) {
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    
+    ec_write_index(EC_CMD_QUERY);
+    ec_write_data(0x00); // 查询版本命令
+    
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    
+    // 读取版本字符串
+    for (int i = 0; i < max_len - 1; i++) {
+        unsigned char c = ec_read_data();
+        if (c == 0) {
+            version[i] = '\0';
+            break;
+        }
+        version[i] = c;
+    }
+    version[max_len - 1] = '\0';
+    
+    return 0;
+}
+
+// 检查 EC 是否存活
+int ec_check_alive() {
+    unsigned char test_value;
+    
+    // 尝试读取一个已知的 RAM 地址（通常是版本信息区域）
+    if (ec_ram_read_byte(0x00, &test_value) == 0) {
+        return 1;
+    }
+    
+    return 0;
+}
+// 打印 EC 状态信息
+void print_ec_status() {
+    unsigned char status = inb(ITE_EC_CMD_PORT);
+    printf("EC Status: 0x%02X\n", status);
+    printf("  OBF (Output Buffer Full): %d\n", (status & 0x01) ? 1 : 0);
+    printf("  IBF (Input Buffer Full): %d\n", (status & 0x02) ? 1 : 0);
+    printf("  CMD (Last was command): %d\n", (status & 0x08) ? 1 : 0);
+}
+
+volatile uint32_t* map_apic_memory() {
+    int fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (fd < 0) {
+        perror("打开/dev/mem失败");
+        return NULL;
+    }
+    
+    void* mapped = mmap(NULL, 4096, PROT_READ | PROT_WRITE, 
+                       MAP_SHARED, fd, APIC_ADDRESS);
+    close(fd);
+    
+    if (mapped == MAP_FAILED) {
+        perror("内存映射失败");
+        return NULL;
+    }
+    
+    return (volatile uint32_t*)mapped;
+}
+
+void unmap_apic_memory(volatile uint32_t* addr) {
+    if (addr) {
+        munmap((void*)addr, 4096);
+    }
+}
+
+// 读取32位内存
+uint32_t RMem32(volatile uint32_t* base, uint32_t offset) {
+    return *(base + (offset / sizeof(uint32_t)));
+}
+
+// 写入32位内存
+void WMem32(volatile uint32_t* base, uint32_t offset, uint32_t value) {
+    *(base + (offset / sizeof(uint32_t))) = value;
+}
+
+int DisableSci() {
+    volatile uint32_t* apic_base = map_physical_memory(APIC_ADDRESS, 0x1000);
+    if (!apic_base) {
+        fprintf(stderr, "无法映射APIC内存\n");
+        return 0;
+    }
+    
+    uint32_t v = (2 * APIC_IRQ) + 0x10;
+    WMem32(apic_base, v, 0);  // 写入偏移地址
+    
+    uint32_t sci = RMem32(apic_base, 0x10);
+    printf("当前SCI值: 0x%08X\n", sci);
+    
+    sci |= 0x00010000;  // 设置屏蔽位
+    WMem32(apic_base, 0x10, sci);
+    
+    printf("禁用SCI后的值: 0x%08X\n", RMem32(apic_base, 0x10));
+    
+    unmap_physical_memory(apic_base, 0x1000);
+    return 1;
+}
+
+int EnableSci() {
+    volatile uint32_t* apic_base = map_physical_memory(APIC_ADDRESS, 0x1000);
+    if (!apic_base) {
+        fprintf(stderr, "无法映射APIC内存\n");
+        return 0;
+    }
+    
+    uint32_t v = (2 * APIC_IRQ) + 0x10;
+    WMem32(apic_base, v, 0);  // 写入偏移地址
+    
+    uint32_t sci = RMem32(apic_base, 0x10);
+    printf("当前SCI值: 0x%08X\n", sci);
+    
+    sci &= 0xFFFEFFFF;  // 清除屏蔽位
+    WMem32(apic_base, 0x10, sci);
+    
+    printf("启用SCI后的值: 0x%08X\n", RMem32(apic_base, 0x10));
+    
+    unmap_physical_memory(apic_base, 0x1000);
+    return 1;
+}
+// 映射物理内存到用户空间
+volatile uint32_t* map_physical_memory(uint64_t phys_addr, size_t size) {
+    int mem_fd;
+    void *mapped_addr;
+    
+    // 打开 /dev/mem
+    mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
+    if (mem_fd < 0) {
+        perror("无法打开 /dev/mem");
+        return NULL;
+    }
+    
+    // 映射物理内存
+    mapped_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, 
+                      MAP_SHARED, mem_fd, phys_addr);
+    close(mem_fd);
+    
+    if (mapped_addr == MAP_FAILED) {
+        perror("内存映射失败");
+        return NULL;
+    }
+    
+    return (volatile uint32_t*)mapped_addr;
+}
+
+// 解除内存映射
+void unmap_physical_memory(volatile uint32_t* addr, size_t size) {
+    if (addr) {
+        munmap((void*)addr, size);
+    }
+}
+void scan_ec_ports() {
+    int ports[][2] = {
+        {0x62, 0x66},  // 标准 ITE
+        {0x68, 0x6C},  // 替代 ITE
+        {0x2E, 0x2F},  // 超级 I/O
+        {0x6E, 0x6F},  // 另一种常见组合
+        //{0x164, 0x168}, // ACPI EC
+        {0, 0}
+    };
+    
+    printf("扫描EC端口...\n");
+    for (int i = 0; ports[i][0] != 0; i++) {
+        if (ioperm(ports[i][0], 2, 1) == 0) {
+            unsigned char status = inb(ports[i][1]);
+            printf("端口 %02X/%02X: 状态=0x%02X", 
+                   ports[i][0], ports[i][1], status);
+            
+            if (status != 0 && status != 0xFF) {
+                printf(" *可能有效*");
+            }
+            printf("\n");
+            
+            ioperm(ports[i][0], 2, 0);
+            usleep(10000);
+        }
+    }
+}
+void diagnose_ec_issue() {
+    printf("=== EC 68/6C 端口诊断 ===\n\n");
+    
+    // 获取端口权限
+    if (ioperm(ITE_EC_DATA_PORT, 2, 1) < 0) {
+        perror("获取端口权限失败");
+        return;
+    }
+    
+    // 测试直接读取端口状态
+    printf("直接读取端口状态:\n");
+    printf("CMD端口(0x6C): 0x%02X\n", inb(ITE_EC_CMD_PORT));
+    printf("DATA端口(0x68): 0x%02X\n", inb(ITE_EC_DATA_PORT));
+    
+    // 测试写入后读取
+    printf("\n测试写入后读取:\n");
+    outb(0xAA, ITE_EC_DATA_PORT);
+    printf("写入 0xAA 到 DATA端口，读取: 0x%02X\n", inb(ITE_EC_DATA_PORT));
+    
+    outb(0x55, ITE_EC_DATA_PORT);
+    printf("写入 0x55 到 DATA端口，读取: 0x%02X\n", inb(ITE_EC_DATA_PORT));
+    
+    // 测试命令端口
+    printf("\n测试命令端口:\n");
+    outb(0x80, ITE_EC_CMD_PORT);
+    printf("写入 0x80 到 CMD端口，状态: 0x%02X\n", inb(ITE_EC_CMD_PORT));
+    
+    ioperm(ITE_EC_DATA_PORT, 2, 0);
+}
+int try_alternative_protocols(unsigned char address, unsigned char *value) {
+    printf("\n=== 尝试替代协议 ===\n");
+    
+    if (ioperm(ITE_EC_DATA_PORT, 2, 1) < 0) return -1;
+    
+    // 方法1: 直接索引协议
+    // printf("方法1: 直接索引协议\n");
+    // outb(address, ITE_EC_DATA_PORT);      // 地址写到数据端口
+    // outb(0x80, ITE_EC_CMD_PORT);         // 命令写到命令端口
+    // usleep(1000);
+    // *value = inb(ITE_EC_DATA_PORT);
+    // printf("结果: 0x%02X\n", *value);
+    
+    // 方法2: 延迟较长的协议
+    // printf("方法2: 长延迟协议\n");
+    // outb(0x80, ITE_EC_CMD_PORT);
+    // usleep(5000);  // 5ms 延迟
+    // outb(address, ITE_EC_DATA_PORT);
+    // usleep(5000);
+    // *value = inb(ITE_EC_DATA_PORT);
+    // printf("结果: 0x%02X\n", *value);
+    
+    // 方法3: 带重试的协议
+    printf("方法3: 重试协议\n");
+    for (int retry = 0; retry < 3; retry++) {
+        outb(0x80, ITE_EC_CMD_PORT);
+        usleep(1000);
+        outb(address, ITE_EC_DATA_PORT);
+        usleep(1000);
+        
+        unsigned char status = inb(ITE_EC_CMD_PORT);
+        if (status & 0x01) {  // OBF 置位
+            *value = inb(ITE_EC_DATA_PORT);
+            printf("重试 %d: 成功 0x%02X\n", retry + 1, *value);
+            ioperm(ITE_EC_DATA_PORT, 2, 0);
+            return 0;
+        }
+        printf("重试 %d: 状态=0x%02X\n", retry + 1, status);
+    }
+    
+    ioperm(ITE_EC_DATA_PORT, 2, 0);
+    return -1;
 }

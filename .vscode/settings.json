@@ -58,6 +58,7 @@
   "C_Cpp_Runner.msvcSecureNoWarnings": false,
   "files.associations": {
     "hidapi.h": "c",
-    "protocol.h": "c"
+    "protocol.h": "c",
+    "6266.C": "cpp"
   }
 }
