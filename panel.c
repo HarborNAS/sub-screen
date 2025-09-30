@@ -16,21 +16,25 @@
 #include <sys/io.h>
 #include <fcntl.h>
 #include <errno.h>
-
-
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <stdint.h>
 
+
+
+#include <ctype.h>
+#include <stdarg.h>
 #define APIC_ADDRESS 0xFEC00000
 #define APIC_IRQ 0x09
-
+#define DebugToken   false
 
 #define MAXLEN 0x40
 #define PRODUCTID 0x0002
 #define VENDORID 0x5448
 #define DURATION 1
-
+#define MAX_PATH 256
+#define MAX_LINE 512
 // ITE
 #define ITE_EC_DATA_PORT    0x62
 #define ITE_EC_INDEX_PORT   0x66
@@ -57,6 +61,7 @@ typedef struct {
     unsigned long long free_size;   // 可用容量 (bytes)
     unsigned long long used_size;   // 已用容量 (bytes)
     double usage_percent;   // 使用百分比
+    int temperature;  // 温度信息
 } DiskInfo;
 
 static unsigned char COMMLEN = offsetof(Request, common_data.data) - offsetof(Request, length);
@@ -78,6 +83,13 @@ int get_mountpoint_usage(const char *mountpoint, unsigned long long *total,
                         unsigned long long *free, unsigned long long *used);
 int get_all_disk_info(DiskInfo **disks);
 void print_modify_disk_size(unsigned long long bytes);
+int file_exists(const char *filename);
+int read_file(const char *filename, char *buffer, size_t buffer_size);
+int get_disk_temperature_sysfs(const char *device);
+void get_sata_disk_info(const char *device, char *model, char *serial, size_t size);
+int list_sata_devices(char devices[][32], int max_devices);
+int get_disk_temperature(const char *device);
+int get_sata_disk_temperature(const char *device);
 //EC6266
 int acquire_io_permissions();
 void release_io_permissions();
@@ -124,111 +136,170 @@ int main(void) {
     unsigned long long disk_total_capacity = 0;
     unsigned long long disk_total_free = 0;
     unsigned long long disk_total_used = 0;
+    #if DebugToken
+    printf("=== SATA硬盘温度监测 ===\n\n");
     
-    try_alternative_protocols(0xA0,hid_report);
-
-
-
-        //Disable SCI
-        volatile uint32_t* apic_base = map_apic_memory();
-        if (!apic_base) {
-            return 1;
-        }
-        uint32_t v = (2 * APIC_IRQ) + 0x10;
-        uint32_t sci_reg = RMem32(apic_base, 0x10);
+        char devices[10][32];
+    int device_count = list_sata_devices(devices, 10);
+    //Remove if SATA return
+    // if (device_count == 0) {
+    //     printf("未找到SATA硬盘设备\n");
+    //     return 1;
+    // }
+    
+    printf("找到 %d 个SATA设备:\n", device_count);
+    
+    for (int i = 0; i < device_count; i++) {
+        char model[128], serial[64];
+        get_sata_disk_info(devices[i], model, serial, sizeof(model));
         
-        //printf("APIC基地址: 0x%p\n", (void*)APIC_ADDRESS);
-        //printf("IRQ: %d\n", APIC_IRQ);
-        //printf("当前SCI寄存器值: 0x%08X\n", sci_reg);
-        // printf("屏蔽位状态: %s\n", (sci_reg & 0x00010000) ? "已屏蔽" : "未屏蔽");
-        // DisableSci();
-        // sci_reg = RMem32(apic_base, 0x10);
-        // printf("屏蔽位状态: %s\n", (sci_reg & 0x00010000) ? "已屏蔽" : "未屏蔽");
-        scan_ec_ports();
-        //EnableSci();
-        //unmap_apic_memory(apic_base);
+        printf("\n设备: /dev/%s\n", devices[i]);
+        printf("型号: %s\n", model);
+        printf("序列号: %s\n", serial);
+        
+        int temperature = get_sata_disk_temperature(devices[i]);
+        if (temperature != -1) {
+            printf("温度: %d°C\n", temperature);
+            
+            if (temperature < 40) {
+                printf("状态: 正常\n");
+            } else if (temperature < 50) {
+                printf("状态: 温热\n");
+            } else if (temperature < 60) {
+                printf("状态: 较热\n");
+            } else {
+                printf("状态: 过热警告！\n");
+            }
+        } else {
+            printf("温度: 无法获取\n");
+        }
+        
+        printf("---\n");
+    }
+    #endif
+    //try_alternative_protocols(0xA0,hid_report);
+    //Disable SCI
+    // volatile uint32_t* apic_base = map_apic_memory();
+    // if (!apic_base) {
+    //     return 1;
+    // }
+    // uint32_t v = (2 * APIC_IRQ) + 0x10;
+    // uint32_t sci_reg = RMem32(apic_base, 0x10);
+    
+    //printf("APIC基地址: 0x%p\n", (void*)APIC_ADDRESS);
+    //printf("IRQ: %d\n", APIC_IRQ);
+    //printf("当前SCI寄存器值: 0x%08X\n", sci_reg);
+    // printf("屏蔽位状态: %s\n", (sci_reg & 0x00010000) ? "已屏蔽" : "未屏蔽");
+    // DisableSci();
+    // sci_reg = RMem32(apic_base, 0x10);
+    // printf("屏蔽位状态: %s\n", (sci_reg & 0x00010000) ? "已屏蔽" : "未屏蔽");
+    //scan_ec_ports();
+    //EnableSci();
+    //unmap_apic_memory(apic_base);
     while (true) {
-        // Request* request = (Request *)hid_report;
-        // //Time
-        // int timereportsize = init_hidreport(request, SET, TIME_AIM);
-        // append_crc(request);
-        // if (hid_write(handle, hid_report, timereportsize) == -1) {
+        Request* request = (Request *)hid_report;
+        //Time
+        int timereportsize = init_hidreport(request, SET, TIME_AIM);
+        append_crc(request);
+        if (hid_write(handle, hid_report, timereportsize) == -1) {
+            break;
+        }
+        // if (hid_read(handle, hid_report, 0x40) == -1) {
         //     break;
         // }
+        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        #if DebugToken
+        printf("TimeSendOK\n");
+        #endif
+        sleep(1);
+        //*****************************************************/
+        // //CPU
+        int cpureportsize = init_hidreport(request, SET, CPU_AIM);
+        append_crc(request);
+        if (hid_write(handle, hid_report, cpureportsize) == -1) {
+            break;
+        }
+
         // // if (hid_read(handle, hid_report, 0x40) == -1) {
         // //     break;
         // // }
-        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        // sleep(1);
-        // //*****************************************************/
-        // // //CPU
-        // int cpureportsize = init_hidreport(request, SET, CPU_AIM);
-        // append_crc(request);
-        // if (hid_write(handle, hid_report, cpureportsize) == -1) {
-        //     break;
-        // }
+        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        #if DebugToken
+        printf("CPUSendOK\n");
+        #endif
+        sleep(1);
+        //*****************************************************/
+        // //Memory Usage
+        int memusagesize = init_hidreport(request, SET, MEMORY_AIM);
+        append_crc(request);
+        if (hid_write(handle, hid_report, memusagesize) == -1) {
+            break;
+        }
+        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        #if DebugToken
+        printf("MemSendOK\n");
+        #endif
+        sleep(1);
+        //*****************************************************/
+        //User Online
+        int usersize = init_hidreport(request, SET, USER_AIM);
+        append_crc(request);
+        if (hid_write(handle, hid_report, usersize) == -1) {
+            break;
+        }
+        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        #if DebugToken
+        printf("UserSendOK\n");
+        #endif
+        sleep(1);
+        //*****************************************************/
+        //Get Error
+        int result = hid_read_timeout(handle, ack, 0x40, -1);
+        if (result == -1) {
+            break;
+        }
 
-        // // // if (hid_read(handle, hid_report, 0x40) == -1) {
-        // // //     break;
-        // // // }
-        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        // sleep(1);
-        // //*****************************************************/
-        // // //Memory Usage
-        // int memusagesize = init_hidreport(request, SET, MEMORY_AIM);
-        // append_crc(request);
-        // if (hid_write(handle, hid_report, memusagesize) == -1) {
-        //     break;
-        // }
-        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        // sleep(1);
-        // //*****************************************************/
-        // //User Online
-        // int usersize = init_hidreport(request, SET, USER_AIM);
-        // append_crc(request);
-        // if (hid_write(handle, hid_report, usersize) == -1) {
-        //     break;
-        // }
-        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        // sleep(1);
-        // //*****************************************************/
-        // //Get Error
-        // int result = hid_read_timeout(handle, ack, 0x40, -1);
-        // if (result == -1) {
-        //     break;
-        // }
+        if (result > 0) {
+            parse_ack((Ack *)ack, request->aim);
+        }
+        if (hid_read(handle, hid_report, 0x40) == -1) {
+            break;
+        }
+        #if DebugToken
+        printf("ReadData:0x%02x\n",hid_report[1]);
+        #endif
+        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        memset(ack, 0x0, sizeof(unsigned char) * 0x40);
+        //*****************************************************/
+        //dynamic read diskcount
 
-        // if (result > 0) {
-        //     parse_ack((Ack *)ack, request->aim);
-        // }
-
-        // memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        // memset(ack, 0x0, sizeof(unsigned char) * 0x40);
-        // //*****************************************************/
-        // //dynamic read diskcount
-        // disk_count = get_all_disk_info(&disks);
-        // if (disk_count <= 0) {
-        //     printf("未找到物理磁盘设备\n");
-        //     return 1;
-        // }
-        // for (int i = 0; i < disk_count; i++) {
-        // printf("磁盘 %d: %s\n", i + 1, disks[i].device);
-        // printf("总容量: ");
-        // print_modify_disk_size(disks[i].total_size);
-        // printf("\n");
-        
-        // if (strlen(disks[i].mountpoint) > 0) {
-        //     printf("可用容量: ");
-        //     print_modify_disk_size(disks[i].free_size);
-        //     printf("\n");
-        //     printf("已用容量: ");
-        //     print_modify_disk_size(disks[i].used_size);
-        //     printf("\n");
-        //     printf("使用率: %.1f%%\n", disks[i].usage_percent);
-        // } else {
-        //     printf("状态: 未挂载\n");
-        // }
-        
+        disk_count = get_all_disk_info(&disks);
+        if (disk_count <= 0) {
+            printf("未找到物理磁盘设备\n");
+            return 1;
+        }
+        for (int i = 0; i < disk_count; i++) {
+            #if DebugToken
+            printf("磁盘 %d: %s\n", i + 1, disks[i].device);
+            printf("总容量: ");
+            print_modify_disk_size(disks[i].total_size);
+            printf("\n");
+            
+            if (strlen(disks[i].mountpoint) > 0) {
+                printf("可用容量: ");
+                print_modify_disk_size(disks[i].free_size);
+                printf("\n");
+                printf("已用容量: ");
+                print_modify_disk_size(disks[i].used_size);
+                printf("\n");
+                printf("使用率: %.1f%%", disks[i].usage_percent);
+                printf("\n");
+                printf("Temp: %d\n", disks[i].temperature);
+            } else {
+                printf("状态: 未挂载\n");
+            }
+            #endif
+        }
         //*****************************************************/
         
         
@@ -308,7 +379,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim) {
         }
         // 关闭文件
         endutent();
-        printf("User Online Count:%d/n",user_count);
+        //printf("User Online Count:%d\n",user_count);
         request->user_data.user_info.online = user_count;
         return offsetof(Request, user_data.crc) + 1;
     case MEMORY_AIM:
@@ -648,11 +719,177 @@ int get_all_disk_info(DiskInfo **disks) {
                 }
             }
         }
+        // 新增：获取硬盘温度
+        (*disks)[i].temperature = get_disk_temperature((*disks)[i].device);
     }
     
     return disk_count;
 }
+int file_exists(const char *filename) {
+    struct stat st;
+    return (stat(filename, &st) == 0);
+}
+// 读取文件内容到缓冲区
+int read_file(const char *filename, char *buffer, size_t buffer_size) {
+    FILE *file = fopen(filename, "r");
+    if (!file) return -1;
+    
+    size_t bytes_read = fread(buffer, 1, buffer_size - 1, file);
+    buffer[bytes_read] = '\0';
+    fclose(file);
+    return 0;
+}
+// 执行命令并获取输出
+int execute_command(const char *cmd, char *output, size_t output_size) {
+    FILE *fp = popen(cmd, "r");
+    if (!fp) return -1;
+    
+    if (fgets(output, output_size, fp) == NULL) {
+        pclose(fp);
+        return -1;
+    }
+    
+    output[strcspn(output, "\n")] = 0;
+    pclose(fp);
+    return 0;
+}
+// 安全构建路径
+void build_safe_path(char *dest, size_t dest_size, const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(dest, dest_size, fmt, args);
+    va_end(args);
+    
+    // 确保字符串以null结尾
+    dest[dest_size - 1] = '\0';
+}
+// 获取SATA硬盘温度 - 主要方法
+int get_sata_disk_temperature(const char *device) {
+    char hwmon_path[MAX_PATH];
+    char temp_path[MAX_PATH];
+    
+    // 方法1: 通过hwmon获取温度
+    build_safe_path(hwmon_path, sizeof(hwmon_path), "/sys/block/%s/device/hwmon", device);
+    
+    if (file_exists(hwmon_path)) {
+        DIR *dir = opendir(hwmon_path);
+        if (dir) {
+            struct dirent *entry;
+            while ((entry = readdir(dir)) != NULL) {
+                if (strncmp(entry->d_name, "hwmon", 5) == 0) {
+                    // 安全构建路径
+                    build_safe_path(temp_path, sizeof(temp_path), 
+                                   "%s/%s/temp1_input", hwmon_path, entry->d_name);
+                    
+                    if (file_exists(temp_path)) {
+                        char temp_value[32];
+                        if (read_file(temp_path, temp_value, sizeof(temp_value)) == 0) {
+                            int temp = atoi(temp_value);
+                            closedir(dir);
+                            
+                            if (temp > 1000) {
+                                return temp / 1000;
+                            } else {
+                                return temp;
+                            }
+                        }
+                    }
+                }
+            }
+            closedir(dir);
+        }
+    }
+    
+    // 方法2: 使用smartctl获取温度
+    char cmd[MAX_PATH];
+    char output[64];
+    
+    const char *smartctl_patterns[] = {
+        "smartctl -A /dev/%s 2>/dev/null | grep -i 'Temperature_Celsius'",
+        "smartctl -A /dev/%s 2>/dev/null | grep -i 'Current Drive Temperature'",
+        "smartctl -A /dev/%s 2>/dev/null | grep -i 'Temperature' | head -1",
+        NULL
+    };
+    
+    for (int i = 0; smartctl_patterns[i] != NULL; i++) {
+        build_safe_path(cmd, sizeof(cmd), smartctl_patterns[i], device);
+        if (execute_command(cmd, output, sizeof(output)) == 0) {
+            // 在输出中查找数字
+            char *ptr = output;
+            while (*ptr) {
+                if (isdigit((unsigned char)*ptr)) {
+                    int temp = atoi(ptr);
+                    if (temp > 0 && temp < 100) {
+                        return temp;
+                    }
+                }
+                ptr++;
+            }
+        }
+    }
+    
+    return -1;
+}
+// 获取SATA硬盘信息
+void get_sata_disk_info(const char *device, char *model, char *serial, size_t size) {
+    char path[MAX_PATH];
+    
+    // 获取型号
+    snprintf(path, sizeof(path), "/sys/block/%s/device/model", device);
+    if (read_file(path, model, size) != 0) {
+        strncpy(model, "Unknown", size);
+    }
+    
+    // 去除换行符
+    model[strcspn(model, "\n")] = 0;
+    
+    // 获取序列号
+    snprintf(path, sizeof(path), "/sys/block/%s/device/serial", device);
+    if (read_file(path, serial, size) != 0) {
+        strncpy(serial, "Unknown", size);
+    }
+    
+    // 去除换行符
+    serial[strcspn(serial, "\n")] = 0;
+}
 
+// 列出所有SATA设备
+int list_sata_devices(char devices[][32], int max_devices) {
+    int count = 0;
+    DIR *block_dir = opendir("/sys/block");
+    
+    if (!block_dir) return 0;
+    
+    struct dirent *entry;
+    while ((entry = readdir(block_dir)) != NULL && count < max_devices) {
+        // 只关注sdX设备（SATA/SCSI）
+        if (strncmp(entry->d_name, "sd", 2) == 0) {
+            // 确保是物理设备而不是分区
+            if (strlen(entry->d_name) == 3 || 
+                (strlen(entry->d_name) == 4 && entry->d_name[3] >= 'a' && entry->d_name[3] <= 'z')) {
+                
+                strncpy(devices[count], entry->d_name, 32);
+                
+                printf("1111111111\n");
+            }
+            count++;
+        }
+    }
+    
+    closedir(block_dir);
+    return count;
+}
+// 获取硬盘温度的通用函数
+int get_disk_temperature(const char *device) {
+    int temperature = -1;
+    
+    // 使用sysfs
+    //temperature = get_disk_temperature_sysfs(device);
+    if (temperature != -1) {
+        return temperature;
+    }
+    return 0;
+}
 // Modify size
 void print_modify_disk_size(unsigned long long bytes) {
     const char *units[] = {"B", "KB", "MB", "GB", "TB"};
