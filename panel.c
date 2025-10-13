@@ -102,9 +102,7 @@ int ec_ram_write_byte(unsigned char address, unsigned char value);
 int ec_ram_read_block(unsigned char start_addr, unsigned char *buffer, int length);
 int ec_ram_write_block(unsigned char start_addr, unsigned char *data, int length);
 int ec_query_version(char *version, int max_len);
-int ec_check_alive();
-void print_ec_status();
-void diagnose_ec_issue();
+//Memory
 volatile uint32_t* map_apic_memory();
 void unmap_apic_memory(volatile uint32_t* addr);
 uint32_t RMem32(volatile uint32_t* base, uint32_t offset);
@@ -113,8 +111,6 @@ int DisableSci();
 int EnableSci();
 volatile uint32_t* map_physical_memory(uint64_t phys_addr, size_t size);
 void unmap_physical_memory(volatile uint32_t* addr, size_t size);
-void scan_ec_ports();
-int try_alternative_protocols(unsigned char address, unsigned char *value);
 CPUData prev_data, curr_data;
 struct utmp *ut;
 
@@ -136,6 +132,19 @@ int main(void) {
     unsigned long long disk_total_capacity = 0;
     unsigned long long disk_total_free = 0;
     unsigned long long disk_total_used = 0;
+    
+    #if DebugToken
+    printf("CPUTemp:%d\n",cputemp);
+    unsigned char ECcputemp = 0;
+    // 获取 I/O 权限
+    acquire_io_permissions();
+    ec_ram_read_byte(0x70,&ECcputemp);
+    printf("EC响应CPU Temp: 0x%02X\n", ECcputemp);
+    ec_ram_write_byte(0x40,0xFF);
+
+    // 释放 I/O 权限
+    release_io_permissions();
+    #endif
     #if DebugToken
     printf("=== SATA硬盘温度监测 ===\n\n");
     
@@ -176,26 +185,7 @@ int main(void) {
         
         printf("---\n");
     }
-    #endif
-    //try_alternative_protocols(0xA0,hid_report);
-    //Disable SCI
-    // volatile uint32_t* apic_base = map_apic_memory();
-    // if (!apic_base) {
-    //     return 1;
-    // }
-    // uint32_t v = (2 * APIC_IRQ) + 0x10;
-    // uint32_t sci_reg = RMem32(apic_base, 0x10);
-    
-    //printf("APIC基地址: 0x%p\n", (void*)APIC_ADDRESS);
-    //printf("IRQ: %d\n", APIC_IRQ);
-    //printf("当前SCI寄存器值: 0x%08X\n", sci_reg);
-    // printf("屏蔽位状态: %s\n", (sci_reg & 0x00010000) ? "已屏蔽" : "未屏蔽");
-    // DisableSci();
-    // sci_reg = RMem32(apic_base, 0x10);
-    // printf("屏蔽位状态: %s\n", (sci_reg & 0x00010000) ? "已屏蔽" : "未屏蔽");
-    //scan_ec_ports();
-    //EnableSci();
-    //unmap_apic_memory(apic_base);
+    #endif    
     while (true) {
         Request* request = (Request *)hid_report;
         //Time
@@ -301,27 +291,7 @@ int main(void) {
             #endif
         }
         //*****************************************************/
-        
-        
-        
-        //scan_ec_ports();
-        // // 获取 I/O 权限
-        // unsigned char address,value;
-        // address = 0xA0;
-        // if (acquire_io_permissions() < 0) {
-        //     fprintf(stderr, "需要 root 权限运行此程序\n");
-        //     return 1;
-        // }
-        // print_ec_status();
-        //     int result = 0;
-        // if (ec_ram_read_byte(address, &value) == 0) {
-        //     printf("Address 0x%02X: 0x%02X (%d)\n", address, value, value);
-        // } else {
-        //     fprintf(stderr, "Failed to read address 0x%02X\n", address);
-        //     result = 1;
-        // }
-        // // 释放 I/O 权限
-        // release_io_permissions();
+
         
         sleep(DURATION);
     }
@@ -362,6 +332,13 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim) {
         request->cpu_data.cpu_info.usage = calculate_cpu_usage(&prev_data, &curr_data);
         // 更新前一次的数据
         prev_data = curr_data;
+        // 获取 I/O 权限
+        acquire_io_permissions();
+        unsigned char CPU_fan = 0;
+        ec_ram_read_byte(0x70,&CPU_fan);
+        request->cpu_data.cpu_info.rpm = CPU_fan;
+        // 释放 I/O 权限
+        release_io_permissions();
         return offsetof(Request, cpu_data.crc) + 1;
     case USER_AIM:
         request->length += sizeof(request->user_data);
@@ -906,24 +883,25 @@ void print_modify_disk_size(unsigned long long bytes) {
 //6266 CMD
 // 获取 I/O 端口权限
 int acquire_io_permissions() {
-    if (iopl(3) < 0) {
-        perror("iopl failed");
+    // 请求62/66端口权限
+    if (ioperm(ITE_EC_DATA_PORT, 1, 1) != 0) {
+        printf("错误: 无法获取端口 0x%02X 权限\n", ITE_EC_DATA_PORT);
+        return -1;
+    }
+    if (ioperm(ITE_EC_CMD_PORT, 1, 1) != 0) {
+        printf("错误: 无法获取端口 0x%02X 权限\n", ITE_EC_CMD_PORT);
+        ioperm(ITE_EC_DATA_PORT, 1, 0);
         return -1;
     }
     
-    // 也可以使用 ioperm 获取特定端口的权限
-    if (ioperm(ITE_EC_INDEX_PORT, 2, 1) < 0) {
-        perror("ioperm failed");
-        return -1;
-    }
-    
+    printf("EC 62/66端口权限获取成功\n");
     return 0;
 }
 
 // 释放 I/O 端口权限
 void release_io_permissions() {
-    ioperm(ITE_EC_INDEX_PORT, 2, 0);
-    iopl(0);
+    ioperm(ITE_EC_DATA_PORT, 1, 0);
+    ioperm(ITE_EC_CMD_PORT, 1, 0);
 }
 // 等待 EC 就绪
 int ec_wait_ready() {
@@ -944,7 +922,7 @@ int ec_wait_ready() {
 
 // 写入 EC 索引
 void ec_write_index(unsigned char index) {
-    outb(index, ITE_EC_INDEX_PORT);
+    outb(index, ITE_EC_CMD_PORT);
 }
 
 // 写入 EC 数据
@@ -964,14 +942,21 @@ int ec_ram_read_byte(unsigned char address, unsigned char *value) {
     
     // 发送读取命令和地址
     ec_write_index(EC_CMD_READ_RAM);
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
     ec_write_data(address);
     
     if (ec_wait_ready() < 0) {
         return -1;
     }
-    
+    //测试发现需要额外加一个delay不加会读上一次数据，Spec没有看到相关的说明，暂时为3000us
+    usleep(3000);
     // 读取数据
     *value = ec_read_data();
+    #if DebugToken
+    printf("EC RAM Read OK\n");
+    #endif
     return 0;
 }
 
@@ -983,7 +968,13 @@ int ec_ram_write_byte(unsigned char address, unsigned char value) {
     
     // 发送写入命令、地址和数据
     ec_write_index(EC_CMD_WRITE_RAM);
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
     ec_write_data(address);
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
     ec_write_data(value);
     
     return ec_wait_ready();
@@ -1033,26 +1024,6 @@ int ec_query_version(char *version, int max_len) {
     version[max_len - 1] = '\0';
     
     return 0;
-}
-
-// 检查 EC 是否存活
-int ec_check_alive() {
-    unsigned char test_value;
-    
-    // 尝试读取一个已知的 RAM 地址（通常是版本信息区域）
-    if (ec_ram_read_byte(0x00, &test_value) == 0) {
-        return 1;
-    }
-    
-    return 0;
-}
-// 打印 EC 状态信息
-void print_ec_status() {
-    unsigned char status = inb(ITE_EC_CMD_PORT);
-    printf("EC Status: 0x%02X\n", status);
-    printf("  OBF (Output Buffer Full): %d\n", (status & 0x01) ? 1 : 0);
-    printf("  IBF (Input Buffer Full): %d\n", (status & 0x02) ? 1 : 0);
-    printf("  CMD (Last was command): %d\n", (status & 0x08) ? 1 : 0);
 }
 
 volatile uint32_t* map_apic_memory() {
@@ -1163,103 +1134,4 @@ void unmap_physical_memory(volatile uint32_t* addr, size_t size) {
     if (addr) {
         munmap((void*)addr, size);
     }
-}
-void scan_ec_ports() {
-    int ports[][2] = {
-        {0x62, 0x66},  // 标准 ITE
-        {0x68, 0x6C},  // 替代 ITE
-        {0x2E, 0x2F},  // 超级 I/O
-        {0x6E, 0x6F},  // 另一种常见组合
-        //{0x164, 0x168}, // ACPI EC
-        {0, 0}
-    };
-    
-    printf("扫描EC端口...\n");
-    for (int i = 0; ports[i][0] != 0; i++) {
-        if (ioperm(ports[i][0], 2, 1) == 0) {
-            unsigned char status = inb(ports[i][1]);
-            printf("端口 %02X/%02X: 状态=0x%02X", 
-                   ports[i][0], ports[i][1], status);
-            
-            if (status != 0 && status != 0xFF) {
-                printf(" *可能有效*");
-            }
-            printf("\n");
-            
-            ioperm(ports[i][0], 2, 0);
-            usleep(10000);
-        }
-    }
-}
-void diagnose_ec_issue() {
-    printf("=== EC 68/6C 端口诊断 ===\n\n");
-    
-    // 获取端口权限
-    if (ioperm(ITE_EC_DATA_PORT, 2, 1) < 0) {
-        perror("获取端口权限失败");
-        return;
-    }
-    
-    // 测试直接读取端口状态
-    printf("直接读取端口状态:\n");
-    printf("CMD端口(0x6C): 0x%02X\n", inb(ITE_EC_CMD_PORT));
-    printf("DATA端口(0x68): 0x%02X\n", inb(ITE_EC_DATA_PORT));
-    
-    // 测试写入后读取
-    printf("\n测试写入后读取:\n");
-    outb(0xAA, ITE_EC_DATA_PORT);
-    printf("写入 0xAA 到 DATA端口，读取: 0x%02X\n", inb(ITE_EC_DATA_PORT));
-    
-    outb(0x55, ITE_EC_DATA_PORT);
-    printf("写入 0x55 到 DATA端口，读取: 0x%02X\n", inb(ITE_EC_DATA_PORT));
-    
-    // 测试命令端口
-    printf("\n测试命令端口:\n");
-    outb(0x80, ITE_EC_CMD_PORT);
-    printf("写入 0x80 到 CMD端口，状态: 0x%02X\n", inb(ITE_EC_CMD_PORT));
-    
-    ioperm(ITE_EC_DATA_PORT, 2, 0);
-}
-int try_alternative_protocols(unsigned char address, unsigned char *value) {
-    printf("\n=== 尝试替代协议 ===\n");
-    
-    if (ioperm(ITE_EC_DATA_PORT, 2, 1) < 0) return -1;
-    
-    // 方法1: 直接索引协议
-    // printf("方法1: 直接索引协议\n");
-    // outb(address, ITE_EC_DATA_PORT);      // 地址写到数据端口
-    // outb(0x80, ITE_EC_CMD_PORT);         // 命令写到命令端口
-    // usleep(1000);
-    // *value = inb(ITE_EC_DATA_PORT);
-    // printf("结果: 0x%02X\n", *value);
-    
-    // 方法2: 延迟较长的协议
-    // printf("方法2: 长延迟协议\n");
-    // outb(0x80, ITE_EC_CMD_PORT);
-    // usleep(5000);  // 5ms 延迟
-    // outb(address, ITE_EC_DATA_PORT);
-    // usleep(5000);
-    // *value = inb(ITE_EC_DATA_PORT);
-    // printf("结果: 0x%02X\n", *value);
-    
-    // 方法3: 带重试的协议
-    printf("方法3: 重试协议\n");
-    for (int retry = 0; retry < 3; retry++) {
-        outb(0x80, ITE_EC_CMD_PORT);
-        usleep(1000);
-        outb(address, ITE_EC_DATA_PORT);
-        usleep(1000);
-        
-        unsigned char status = inb(ITE_EC_CMD_PORT);
-        if (status & 0x01) {  // OBF 置位
-            *value = inb(ITE_EC_DATA_PORT);
-            printf("重试 %d: 成功 0x%02X\n", retry + 1, *value);
-            ioperm(ITE_EC_DATA_PORT, 2, 0);
-            return 0;
-        }
-        printf("重试 %d: 状态=0x%02X\n", retry + 1, status);
-    }
-    
-    ioperm(ITE_EC_DATA_PORT, 2, 0);
-    return -1;
 }
