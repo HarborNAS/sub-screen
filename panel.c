@@ -25,6 +25,9 @@
 
 #include <ctype.h>
 #include <stdarg.h>
+//Discrete GPU
+#include <nvml.h>
+
 #define APIC_ADDRESS 0xFEC00000
 #define APIC_IRQ 0x09
 #define DebugToken   false
@@ -44,6 +47,7 @@
 #define EC_CMD_READ_RAM     0x80    //Test for read CPUTemp
 #define EC_CMD_WRITE_RAM    0x81
 #define EC_CMD_QUERY        0x84
+
 // CPU使用率计算结构体
 typedef struct {
     unsigned long user;
@@ -63,6 +67,18 @@ typedef struct {
     double usage_percent;   // 使用百分比
     int temperature;  // 温度信息
 } DiskInfo;
+
+typedef struct {
+    char name[128];
+    int temperature;          // 温度 (°C)
+    int utilization_gpu;      // GPU使用率 (%)
+    int utilization_memory;   // 显存使用率 (%)
+    long memory_used;         // 已用显存 (MB)
+    long memory_total;        // 总显存 (MB)
+    double power_draw;        // 功耗 (W)
+    int fan_speed;           // 风扇转速 (%)
+    char driver_version[32]; // 驱动版本
+} nvidia_gpu_info_t;
 
 static unsigned char COMMLEN = offsetof(Request, common_data.data) - offsetof(Request, length);
 
@@ -111,9 +127,26 @@ int DisableSci();
 int EnableSci();
 volatile uint32_t* map_physical_memory(uint64_t phys_addr, size_t size);
 void unmap_physical_memory(volatile uint32_t* addr, size_t size);
+void nvidia_print_info();
 CPUData prev_data, curr_data;
+bool IsNvidiaGPU;
 struct utmp *ut;
-
+//Discrete GPU
+typedef struct {
+    unsigned int index;
+    char name[64];
+    nvmlTemperatureSensors_t temp_sensor;
+    unsigned int temperature;
+    unsigned int utilization;
+    unsigned int memory_used;
+    unsigned int memory_total;
+    unsigned int power_usage;
+    unsigned int fan_speed;
+} gpu_info_t;
+int nvidia_smi_available();
+int nvidia_get_gpu_temperature();
+int nvidia_get_gpu_utilization();
+int nvidia_get_gpu_fan_speed();
 int main(void) {
     int res = hid_init();
     hid_device *handle = hid_open(VENDORID, PRODUCTID, NULL);
@@ -124,6 +157,7 @@ int main(void) {
     }
     //initial
     int cputemp,cpusuage,cpufan,memoryusage;
+    IsNvidiaGPU = nvidia_smi_available();
     unsigned char hid_report[MAXLEN] = {0};
     unsigned char ack[MAXLEN] = {0};
     cputemp = get_cpu_temperature();
@@ -242,6 +276,14 @@ int main(void) {
         printf("UserSendOK\n");
         #endif
         sleep(1);
+        if(IsNvidiaGPU)
+        {
+            int dgpusize = init_hidreport(request, SET, GPU_AIM);
+            append_crc(request);
+            if (hid_write(handle, hid_report, dgpusize) == -1) {
+                break;
+        }
+        }
         //*****************************************************/
         //Get Error
         int result = hid_read_timeout(handle, ack, 0x40, -1);
@@ -291,8 +333,6 @@ int main(void) {
             #endif
         }
         //*****************************************************/
-
-        
         sleep(DURATION);
     }
     // 释放内存
@@ -318,7 +358,12 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim) {
     case GPU_AIM:
         request->length += sizeof(request->gpu_data);
         // Code
-
+        if(IsNvidiaGPU)
+        {
+            request->gpu_data.gpu_info.temperature = nvidia_get_gpu_temperature();
+            request->gpu_data.gpu_info.usage = nvidia_get_gpu_utilization();
+            request->gpu_data.gpu_info.rpm = nvidia_get_gpu_fan_speed();
+        }
         return offsetof(Request, gpu_data.crc) + 1;
     case CPU_AIM:
         
@@ -893,8 +938,9 @@ int acquire_io_permissions() {
         ioperm(ITE_EC_DATA_PORT, 1, 0);
         return -1;
     }
-    
+    #if DebugToken
     printf("EC 62/66端口权限获取成功\n");
+    #endif
     return 0;
 }
 
@@ -1134,4 +1180,144 @@ void unmap_physical_memory(volatile uint32_t* addr, size_t size) {
     if (addr) {
         munmap((void*)addr, size);
     }
+}
+// 检查nvidia-smi是否可用
+int nvidia_smi_available() {
+    return system("which nvidia-smi > /dev/null 2>&1") == 0;
+}
+
+// 获取单个GPU的完整信息
+#if DebugToken
+int nvidia_get_single_gpu_info(nvidia_gpu_info_t *gpu) { 
+    FILE *fp = popen("nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,fan.speed,driver_version --format=csv,noheader,nounits 2>/dev/null", "r");
+    if (!fp) {
+        return -1;
+    }
+    
+    char line[512];
+    if (fgets(line, sizeof(line), fp)) {
+        // 解析CSV格式
+        char *tokens[9];
+        int token_count = 0;
+        char *token = strtok(line, ",");
+        
+        while (token && token_count < 9) {
+            // 去除前后空格和换行符
+            while (*token == ' ' || *token == '\t') token++;
+            char *end = token + strlen(token) - 1;
+            while (end > token && (*end == ' ' || *end == '\n' || *end == '\r' || *end == '\t')) *end-- = '\0';
+            
+            tokens[token_count++] = token;
+            token = strtok(NULL, ",");
+        }
+        
+        if (token_count >= 8) {
+            // 名称
+            strncpy(gpu->name, tokens[0], sizeof(gpu->name) - 1);
+            
+            // 温度
+            gpu->temperature = atoi(tokens[1]);
+            
+            // GPU使用率
+            gpu->utilization_gpu = atoi(tokens[2]);
+            
+            // 显存使用率
+            gpu->utilization_memory = atoi(tokens[3]);
+            
+            // 显存
+            gpu->memory_used = atol(tokens[4]);
+            gpu->memory_total = atol(tokens[5]);
+            
+            // 功耗
+            gpu->power_draw = atof(tokens[6]);
+            
+            // 风扇速度
+            if (token_count >= 8 && tokens[7][0] != '\0') {
+                gpu->fan_speed = atoi(tokens[7]);
+            } else {
+                gpu->fan_speed = 0;
+            }
+            
+            // 驱动版本
+            if (token_count >= 9) {
+                strncpy(gpu->driver_version, tokens[8], sizeof(gpu->driver_version) - 1);
+            } else {
+                strcpy(gpu->driver_version, "Unknown");
+            }
+            
+            pclose(fp);
+            return 0;
+        }
+    }
+    
+    pclose(fp);
+    return -1;
+}
+#endif
+// 快速获取GPU温度
+int nvidia_get_gpu_temperature() {
+    char command[] = "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null";
+    
+    FILE *fp = popen(command, "r");
+    if (!fp) return -1;
+    
+    char temp_str[16];
+    int temperature = -1;
+    if (fgets(temp_str, sizeof(temp_str), fp)) {
+        temperature = atoi(temp_str);
+    }
+    pclose(fp);
+    return temperature;
+}
+
+// 快速获取GPU使用率
+int nvidia_get_gpu_utilization() {
+    char command[] = "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null";
+    
+    FILE *fp = popen(command, "r");
+    if (!fp) return -1;
+    
+    char usage_str[16];
+    int utilization = -1;
+    if (fgets(usage_str, sizeof(usage_str), fp)) {
+        utilization = atoi(usage_str);
+    }
+    pclose(fp);
+    return utilization;
+}
+
+// 快速获取GPU风扇转速
+int nvidia_get_gpu_fan_speed() {
+    char command[] = "nvidia-smi --query-gpu=fan.speed --format=csv,noheader,nounits 2>/dev/null";
+    
+    FILE *fp = popen(command, "r");
+    if (!fp) return -1;
+    
+    char speed_str[16];
+    int fan_speed = -1;
+    if (fgets(speed_str, sizeof(speed_str), fp)) {
+        fan_speed = atoi(speed_str);
+    }
+    
+    pclose(fp);
+    return fan_speed;
+}
+
+// 获取GPU核心三要素：温度、使用率、风扇转速
+int nvidia_get_gpu_status(int *temp, int *usage, int *fan) {
+    *temp = nvidia_get_gpu_temperature();
+    *usage = nvidia_get_gpu_utilization();
+    *fan = nvidia_get_gpu_fan_speed();
+    
+    return (*temp >= 0 && *usage >= 0 && *fan >= 0) ? 0 : -1;
+}
+void nvidia_print_info() {
+    int temp, usage, fan;
+    
+    if (nvidia_get_gpu_status(&temp, &usage, &fan) != 0) {
+        printf("GPU: 无法获取信息\n");
+        return;
+    }
+    
+    printf("GPU: %d°C %d%% %d%%\n", temp, usage, fan);
 }
