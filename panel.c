@@ -282,8 +282,9 @@ int main(void) {
             append_crc(request);
             if (hid_write(handle, hid_report, dgpusize) == -1) {
                 break;
+            }
         }
-        }
+        sleep(1);
         //*****************************************************/
         //Get Error
         int result = hid_read_timeout(handle, ack, 0x40, -1);
@@ -358,11 +359,18 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim) {
     case GPU_AIM:
         request->length += sizeof(request->gpu_data);
         // Code
+        unsigned char DGPUtemp = 0;
         if(IsNvidiaGPU)
         {
-            request->gpu_data.gpu_info.temperature = nvidia_get_gpu_temperature();
+            DGPUtemp = nvidia_get_gpu_temperature();
+            request->gpu_data.gpu_info.temperature = DGPUtemp;
             request->gpu_data.gpu_info.usage = nvidia_get_gpu_utilization();
             request->gpu_data.gpu_info.rpm = nvidia_get_gpu_fan_speed();
+            // 获取 I/O 权限
+            acquire_io_permissions();
+            ec_ram_write_byte(0xB0,DGPUtemp);
+            // 释放 I/O 权限
+            release_io_permissions();
         }
         return offsetof(Request, gpu_data.crc) + 1;
     case CPU_AIM:
