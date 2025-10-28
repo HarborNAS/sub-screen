@@ -20,8 +20,9 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <stdint.h>
-
-
+//异步HID通信
+#include <pthread.h>
+#include <signal.h>
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -128,8 +129,16 @@ int EnableSci();
 volatile uint32_t* map_physical_memory(uint64_t phys_addr, size_t size);
 void unmap_physical_memory(volatile uint32_t* addr, size_t size);
 void nvidia_print_info();
+//异步HID
+void signal_handler(int sig);
+void* hid_read_thread(void *arg);
+int safe_hid_write(hid_device *handle, const unsigned char *data, int length);
+
 CPUData prev_data, curr_data;
 bool IsNvidiaGPU;
+static volatile bool running = true;
+static pthread_t read_thread;
+static pthread_mutex_t hid_mutex = PTHREAD_MUTEX_INITIALIZER;
 struct utmp *ut;
 //Discrete GPU
 typedef struct {
@@ -148,6 +157,10 @@ int nvidia_get_gpu_temperature();
 int nvidia_get_gpu_utilization();
 int nvidia_get_gpu_fan_speed();
 int main(void) {
+    // 设置信号处理
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+
     int res = hid_init();
     hid_device *handle = hid_open(VENDORID, PRODUCTID, NULL);
     
@@ -155,7 +168,17 @@ int main(void) {
         res = hid_exit();
         return 0;
     }
-    //initial
+    #if DebugToken
+    printf("HID device opened successfully\n");
+    #endif
+    // 创建读取线程
+    if (pthread_create(&read_thread, NULL, hid_read_thread, handle) != 0) {
+        printf("Failed to create read thread\n");
+        hid_close(handle);
+        hid_exit();
+        return -1;
+    }
+    // 初始化数据
     int cputemp,cpusuage,cpufan,memoryusage;
     IsNvidiaGPU = nvidia_smi_available();
     unsigned char hid_report[MAXLEN] = {0};
@@ -222,56 +245,51 @@ int main(void) {
     #endif    
     while (true) {
         Request* request = (Request *)hid_report;
-        //Time
+        // Time
         int timereportsize = init_hidreport(request, SET, TIME_AIM);
         append_crc(request);
-        if (hid_write(handle, hid_report, timereportsize) == -1) {
+        if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
+            printf("Failed to write TIME data\n");
             break;
         }
-        // if (hid_read(handle, hid_report, 0x40) == -1) {
-        //     break;
-        // }
-        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         #if DebugToken
         printf("TimeSendOK\n");
         #endif
         sleep(1);
         //*****************************************************/
-        // //CPU
+        // CPU
         int cpureportsize = init_hidreport(request, SET, CPU_AIM);
         append_crc(request);
-        if (hid_write(handle, hid_report, cpureportsize) == -1) {
+        if (safe_hid_write(handle, hid_report, cpureportsize) == -1) {
+            printf("Failed to write CPU data\n");
             break;
         }
-
-        // // if (hid_read(handle, hid_report, 0x40) == -1) {
-        // //     break;
-        // // }
-        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         #if DebugToken
         printf("CPUSendOK\n");
         #endif
         sleep(1);
         //*****************************************************/
-        // //Memory Usage
+        // Memory Usage
         int memusagesize = init_hidreport(request, SET, MEMORY_AIM);
         append_crc(request);
-        if (hid_write(handle, hid_report, memusagesize) == -1) {
+        if (safe_hid_write(handle, hid_report, memusagesize) == -1) {
+            printf("Failed to write MEMORY data\n");
             break;
         }
-        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
-        #if DebugToken
-        printf("MemSendOK\n");
-        #endif
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         sleep(1);
         //*****************************************************/
         //User Online
+        // User Online
         int usersize = init_hidreport(request, SET, USER_AIM);
         append_crc(request);
-        if (hid_write(handle, hid_report, usersize) == -1) {
+        if (safe_hid_write(handle, hid_report, usersize) == -1) {
+            printf("Failed to write USER data\n");
             break;
         }
-        memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         #if DebugToken
         printf("UserSendOK\n");
         #endif
@@ -1328,4 +1346,70 @@ void nvidia_print_info() {
     }
     
     printf("GPU: %d°C %d%% %d%%\n", temp, usage, fan);
+}
+// 信号处理函数
+void signal_handler(int sig) {
+    running = false;
+    printf("Received signal %d, shutting down...\n", sig);
+}
+// 阻塞读取线程函数
+void* hid_read_thread(void *arg) {
+    hid_device *handle = (hid_device *)arg;
+    unsigned char read_buf[MAXLEN] = {0};
+    int heartbeat_count = 0;
+    
+    printf("HID read thread started (blocking mode)\n");
+    
+    // 使用阻塞模式 - 这样会一直等待直到有数据到达
+    hid_set_nonblocking(handle, 0);
+    
+    while (running) {
+        int res = hid_read(handle, read_buf, sizeof(read_buf));
+        
+        if (res > 0) {
+            printf("HID Received %d bytes: ", res);
+            for (int i = 0; i < res; i++) {
+                printf("%02x ", read_buf[i]);
+            }
+            printf("\n");
+            
+            // 检测心跳包
+            if (res >= 7 && 
+                read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
+                read_buf[2] == 0xff && read_buf[3] == 0x04 &&
+                read_buf[4] == 0x00 && read_buf[5] == 0x00 && 
+                read_buf[6] == 0x02) {
+                heartbeat_count++;
+                printf(">>> HEARTBEAT detected! Count: %d\n", heartbeat_count);
+            }
+            // 检测其他命令...
+            else if (res >= 6 && 
+                     read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
+                     read_buf[2] == 0xff && read_buf[3] == 0x08 &&
+                     read_buf[4] == 0x00 && read_buf[5] == 0x01) {
+                printf(">>> SHUTDOWN command received!\n");
+                system("shutdown -h now");
+            }
+            else {
+                printf(">>> Other command/data\n");
+            }
+            
+            memset(read_buf, 0, sizeof(read_buf));
+        } else if (res < 0) {
+            printf("Error reading from HID device\n");
+            break;
+        }
+        
+    }
+    
+    printf("HID read thread exited\n");
+    return NULL;
+}
+
+// 线程安全的写入函数
+int safe_hid_write(hid_device *handle, const unsigned char *data, int length) {
+    pthread_mutex_lock(&hid_mutex);
+    int result = hid_write(handle, data, length);
+    pthread_mutex_unlock(&hid_mutex);
+    return result;
 }
