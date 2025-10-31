@@ -31,8 +31,9 @@
 
 #define APIC_ADDRESS 0xFEC00000
 #define APIC_IRQ 0x09
-#define DebugToken   false
-
+#define DebugToken   true
+#define SensorLog   false
+#define IfNoPanel   false
 #define MAXLEN 0x40
 #define PRODUCTID 0x0002
 #define VENDORID 0x5448
@@ -158,9 +159,10 @@ int nvidia_get_gpu_utilization();
 int nvidia_get_gpu_fan_speed();
 int main(void) {
     // 设置信号处理
+    #if !IfNoPanel
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-
+    
     int res = hid_init();
     hid_device *handle = hid_open(VENDORID, PRODUCTID, NULL);
     
@@ -168,18 +170,24 @@ int main(void) {
         res = hid_exit();
         return 0;
     }
-    #if DebugToken
-    printf("HID device opened successfully\n");
+    
+        #if DebugToken
+        printf("HID device opened successfully\n");
+        #endif
     #endif
     // 创建读取线程
+    #if !IfNoPanel
     if (pthread_create(&read_thread, NULL, hid_read_thread, handle) != 0) {
         printf("Failed to create read thread\n");
         hid_close(handle);
         hid_exit();
         return -1;
     }
+    #endif
     // 初始化数据
     int cputemp,cpusuage,cpufan,memoryusage;
+    //1Min Do
+    int MinTimeDiv = 0;
     IsNvidiaGPU = nvidia_smi_available();
     unsigned char hid_report[MAXLEN] = {0};
     unsigned char ack[MAXLEN] = {0};
@@ -244,6 +252,7 @@ int main(void) {
     }
     #endif    
     while (true) {
+        #if !IfNoPanel
         Request* request = (Request *)hid_report;
         // Time
         int timereportsize = init_hidreport(request, SET, TIME_AIM);
@@ -281,7 +290,6 @@ int main(void) {
         memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         sleep(1);
         //*****************************************************/
-        //User Online
         // User Online
         int usersize = init_hidreport(request, SET, USER_AIM);
         append_crc(request);
@@ -321,6 +329,7 @@ int main(void) {
         #endif
         memset(hid_report, 0x0, sizeof(unsigned char) * 0x40);
         memset(ack, 0x0, sizeof(unsigned char) * 0x40);
+        #endif
         //*****************************************************/
         //dynamic read diskcount
 
@@ -356,9 +365,10 @@ int main(void) {
     }
     // 释放内存
     free(disks);
+    #if !IfNoPanel
     hid_close(handle);
     res = hid_exit();
-
+    #endif
     return 0;
 }
 
@@ -938,6 +948,7 @@ int get_disk_temperature(const char *device) {
     }
     return 0;
 }
+
 // Modify size
 void print_modify_disk_size(unsigned long long bytes) {
     const char *units[] = {"B", "KB", "MB", "GB", "TB"};
