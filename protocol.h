@@ -1,22 +1,24 @@
 typedef struct __attribute__((__packed__)) {
     unsigned int timestamp;
 } Time;
-
 typedef struct __attribute__((__packed__)) {
-    unsigned char temperature;
-    unsigned char usage;
-    unsigned char rpm;
-} GPU;
+    unsigned char disk_id;      //>= 1
+    unsigned char unit;         //01 Kb 02 Mb 03 Gb
+    unsigned short total_size;  //Default -1
+    unsigned short used_size;   //Default -1
+    unsigned char temp;         //Default -1
+} Disk;
 
 typedef struct __attribute__((__packed__)) {
     unsigned short online;
 } User;
 
 typedef struct __attribute__((__packed__)) {
-    unsigned char temerature;
+    unsigned char sys_id;
     unsigned char usage;
-    unsigned char rpm;
-} CPU;
+    unsigned char temerature;
+    unsigned short rpm;
+} SystemD;
 
 typedef struct __attribute__((__packed__)) {
     unsigned char software_version;
@@ -26,6 +28,34 @@ typedef struct __attribute__((__packed__)) {
 typedef struct __attribute__((__packed__)) {
     unsigned int usage;
 } Memory;
+
+typedef struct {
+    unsigned char sys_id;    //>= 1
+    unsigned char usage;        //Default -1
+    unsigned int temerature;    //Default -1
+    unsigned short rpm;           //Default -1
+} systemStruct;
+typedef struct __attribute__((__packed__)) {
+    unsigned char syslength;
+    unsigned char sys_id;
+    unsigned char usage;
+    unsigned char temp;
+    unsigned short rpm;
+    unsigned char name[8];
+} SystemPage;
+typedef struct {
+    unsigned char disklength;
+    unsigned char disk_id;      //>= 1
+    unsigned char unit;         //01 Kb 02 Mb 03 Gb
+    unsigned short total_size;  //Default -1
+    unsigned short used_size;   //Default -1
+    unsigned char temp;         //Default -1
+    char name[16];              //Default -1
+} diskStruct;
+typedef struct __attribute__((__packed__)) {
+    unsigned char count;
+    diskStruct disk[2];
+} DiskPage;
 
 // Request HID Report
 typedef struct __attribute__((__packed__)) {
@@ -39,11 +69,10 @@ typedef struct __attribute__((__packed__)) {
             unsigned char data;
             unsigned char crc;
         } common_data;
-
         struct __attribute__((__packed__)){
-            GPU gpu_info;
+            Disk disk_info;
             unsigned char crc;
-        } gpu_data;
+        } disk_data;
 
         struct __attribute__((__packed__)) {
             Time time_info;
@@ -51,9 +80,9 @@ typedef struct __attribute__((__packed__)) {
         }time_data;
 
         struct __attribute__((__packed__)){
-            CPU cpu_info;
+            SystemD system_info;
             unsigned char crc;
-        } cpu_data;
+        } system_data;
 
         struct __attribute__((__packed__)){
             User user_info;
@@ -65,6 +94,48 @@ typedef struct __attribute__((__packed__)) {
             Memory memory_info;
             unsigned char crc;
         } memory_data;
+        //initial page
+        struct __attribute__((__packed__))
+        {
+            unsigned char order;
+            unsigned char total;
+            Time time_info;
+            unsigned char crc;
+        } Homepage_data;
+        struct __attribute__((__packed__)){
+            unsigned char order;
+            unsigned char total;
+            unsigned char syscount;
+            unsigned char count;
+            SystemPage systemPage[2];
+            unsigned char crc;
+        } SystemPage_data;
+
+        struct __attribute__((__packed__)){
+            unsigned char order;
+            unsigned char total;
+            unsigned char diskcount;
+            unsigned char count;
+            diskStruct diskStruct[2];
+            unsigned char crc;
+        } DiskPage_data;
+        struct __attribute__((__packed__)){
+            unsigned char order;
+            unsigned char total;
+            unsigned char diskcount;
+            unsigned char count;
+            unsigned char crc;
+        } NetworkPage_data;
+        struct __attribute__((__packed__)){
+            unsigned char order;
+            unsigned char total;
+            unsigned char powcount;
+            unsigned char count;
+            unsigned char mute;
+            unsigned char properties;
+            unsigned char balance;
+            unsigned char crc;
+        } ModePage_data;
     };
 } Request;
 
@@ -109,7 +180,7 @@ typedef struct __attribute__((__packed__)) {
 // Command Definition
 #define GET 0x1
 #define SET 0x2
-
+#define AUTOSET 0x3
 // Error Definition
 #define SUCCESS 0x00
 #define PACKETLOSS 0x1
@@ -121,17 +192,19 @@ typedef struct __attribute__((__packed__)) {
 #define CMDERR 0x07
 
 // AIM
-#define TIME_AIM 0x00
+#define HomePage_AIM 0x00
+#define TIME_AIM 0x01
 
-#define SILENCE_AIM 0x10
-#define BALANCE_AIM 0x11
-#define PERFORMANCE_AIM 0x12
-
-#define USER_AIM 0x20
-
-#define WATCHFACE_AIM 0x30
-#define USEWATCHFACE_AIM 0x31
-
+#define SystemPage_AIM 0x10
+#define System_AIM 0x11
+#define DiskPage_AIM 0x50
+#define Disk_AIM 0x51
+#define NetworkPage_AIM 0x60
+#define USER_AIM 0x61
+#define ModePage_AIM 0x70
+#define Mute_AIM 0x71
+#define Properties_AIM 0x72
+#define Balance_AIM 0x73
 // AIM SIDESCREEN
 #define NOTIFY_AIM 0x40
 #define COMPONENT_AIM 0x41
@@ -146,9 +219,7 @@ typedef struct __attribute__((__packed__)) {
 // AIM HIBERNATE
 #define COUNTDOWN_AIM 0x50
 #define HIBERNATECANCEL_AIM 0x51
-#define HIBERNATEATONCE_AIM 0x52
+#define HIBERNATEATONCE_AIM 0x81
 
 // AIM SYSTEM
-#define CPU_AIM 0x60
-#define GPU_AIM 0x61
-#define MEMORY_AIM 0x62
+

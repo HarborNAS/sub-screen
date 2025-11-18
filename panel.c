@@ -30,10 +30,10 @@
 #include <stdarg.h>
 //Discrete GPU
 #include <nvml.h>
-
+#include <glob.h>
 #define APIC_ADDRESS 0xFEC00000
 #define APIC_IRQ 0x09
-#define DebugToken   false
+#define DebugToken   true
 #define SensorLog   false
 #define IfNoPanel   false
 #define MAXLEN 0x40
@@ -89,13 +89,16 @@ typedef struct {
 } nvidia_gpu_info_t;
 
 static unsigned char COMMLEN = offsetof(Request, common_data.data) - offsetof(Request, length);
-
-int init_hidreport(Request *request, unsigned char cmd, unsigned char aim);
+void TimeSleep1Sec();
+int init_hidreport(Request *request, unsigned char cmd, unsigned char aim, unsigned char id);
+int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char total,unsigned char order);
 void append_crc(Request *request);
 unsigned char cal_crc(unsigned char * data, int len);
 int get_cpu_temperature();
 void read_cpu_data(CPUData *data);
 float calculate_cpu_usage(const CPUData *prev, const CPUData *curr);
+int get_igpu_temperature();
+float get_igpu_usage();
 unsigned int get_memory_usage();
 void parse_request(Request *request);
 void parse_ack(Ack *ack, unsigned char aim);
@@ -137,9 +140,16 @@ void nvidia_print_info();
 void signal_handler(int sig);
 void* hid_read_thread(void *arg);
 int safe_hid_write(hid_device *handle, const unsigned char *data, int length);
-
+void big_to_little_inplace(unsigned char *data, size_t size);
+void systemoperation(unsigned char time,unsigned char cmd);
+void scan_network_interfaces();
+void get_network_config();
 CPUData prev_data, curr_data;
 bool IsNvidiaGPU;
+int disk_count;
+//1Hour Count
+int HourTimeDiv = 0;
+disk_info_t disks[MAX_DISKS];
 static volatile bool running = true;
 static pthread_t read_thread;
 static pthread_mutex_t hid_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -166,14 +176,22 @@ int main(void) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
+    printf("Step 1: Initializing HIDAPI...\n");
     int res = hid_init();
+    if (res != 0) {
+        printf("ERROR: HIDAPI initialization failed with code %d\n", res);
+        return -1;
+    }
+    printf("HIDAPI initialized successfully\n");
     hid_device *handle = hid_open(VENDORID, PRODUCTID, NULL);
     
     if (handle == NULL) {
+        printf("ERROR: Failed to open device %04x:%04x\n", VENDORID, PRODUCTID);
         res = hid_exit();
         return 0;
     }
-    
+    scan_network_interfaces();
+    get_network_config();
     #if DebugToken
     printf("HID device opened successfully\n");
     #endif
@@ -189,117 +207,272 @@ int main(void) {
     #endif
     // 初始化数据
     int cputemp,cpusuage,cpufan,memoryusage;
-    //1Min Do
-    int MinTimeDiv = 0;
     IsNvidiaGPU = nvidia_smi_available();
     unsigned char hid_report[MAXLEN] = {0};
     unsigned char ack[MAXLEN] = {0};
     cputemp = get_cpu_temperature();
-    disk_info_t disks[MAX_DISKS];
+    
 
     #if DebugToken
-    printf("CPUTemp:%d\n",cputemp);
-    unsigned char ECcputemp = 0;
-    // 获取 I/O 权限
-    acquire_io_permissions();
-    ec_ram_read_byte(0x70,&ECcputemp);
-    printf("EC响应CPU Temp: 0x%02X\n", ECcputemp);
-    ec_ram_write_byte(0x40,0xFF);
+    // printf("CPUTemp:%d\n",cputemp);
+    // unsigned char ECcputemp = 0;
+    // // 获取 I/O 权限
+    // acquire_io_permissions();
+    // ec_ram_read_byte(0x70,&ECcputemp);
+    // printf("EC响应CPU Temp: 0x%02X\n", ECcputemp);
+    // ec_ram_write_byte(0x40,0xFF);
 
-    // 释放 I/O 权限
-    release_io_permissions();
+    // // 释放 I/O 权限
+    // release_io_permissions();
     #endif
-    #if DebugToken
+    #if 1
     printf("=== SATA硬盘温度监测 ===\n\n");
     // 扫描硬盘设备
-    int disk_count = scan_disk_devices(disks, MAX_DISKS);
+    disk_count = scan_disk_devices(disks, MAX_DISKS);
     if (disk_count <= 0) {
         printf("未找到硬盘设备\n");
         return 1;
+    }else
+    {
+        printf("Diskcount:%d\n",disk_count);
     }
     for (int i = 0; i < disk_count; i++) {
-        if (disks[i].temperature != -1) {
+        //if (disks[i].temperature != -1) {
             printf("%s:\n",disks[i].device);
             printf("Temp:%d°C\n", disks[i].temperature);
             printf("Totalsize:%lld\n", disks[i].total_size);
             printf("Usedsize:%lld\n", disks[i].used_size);
             printf("UsedPercent:%f\n", disks[i].usage_percent);
-        }
+        //}
     }
-    #endif    
-    while (true) {
-        #if !IfNoPanel
-        Request* request = (Request *)hid_report;
-        // Time
-        int timereportsize = init_hidreport(request, SET, TIME_AIM);
+    #endif
+    Request* request = (Request *)hid_report;
+    //HomePage
+    #if DebugToken
+    printf("-----------------------------------HomePage initial start-----------------------------------\n");
+    #endif
+    int homepage = init_hidreport(request, SET, TIME_AIM, 255);
+    append_crc(request);
+    if (safe_hid_write(handle, hid_report, homepage) == -1) {
+        printf("Failed to write HomePage data\n");
+    }
+    sleep(3);
+    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    #if DebugToken
+    printf("-----------------------------------HomePage initial end-----------------------------------\n");
+    #endif
+    //SystemPage
+    #if DebugToken
+    printf("-----------------------------------SystemPage initial start-----------------------------------\n");
+    #endif
+    int systempage1 = first_init_hidreport(request, SET, SystemPage_AIM, 2, 1);
+    append_crc(request);
+    if (safe_hid_write(handle, hid_report, systempage1) == -1) {
+        printf("Failed to write SystemPage data\n");
+    }
+    sleep(3);
+    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    #if DebugToken
+    printf("-----------------------------------SystemPage initial second-----------------------------------\n");
+    #endif
+    int systempage2 = first_init_hidreport(request, SET, SystemPage_AIM, 2, 2);
+    append_crc(request);
+    if (safe_hid_write(handle, hid_report, systempage2) == -1) {
+        printf("Failed to write SystemPage data\n");
+    }
+    sleep(1);
+    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    #if DebugToken
+    printf("-----------------------------------SystemPage initial end-----------------------------------\n");
+    #endif
+    //DiskPage
+    #if DebugToken
+    printf("-----------------------------------DiskPage initial start-----------------------------------\n");
+    #endif
+    int diskforcount,diskpage;
+    if(disk_count % 2 == 0)
+        diskforcount = disk_count / 2;
+    else
+        diskforcount = disk_count / 2 + 1;
+    for (int i = 0; i < diskforcount; i++)
+    {
+        diskpage = first_init_hidreport(request, SET, DiskPage_AIM, diskforcount, (i + 1));
         append_crc(request);
-        if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
-            printf("Failed to write TIME data\n");
+        if (safe_hid_write(handle, hid_report, diskpage) == -1) {
+            printf("Failed to write DiskPage data\n");
             break;
         }
+        sleep(3);
         memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-        #if DebugToken
-        printf("TimeSendOK\n");
+        printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
+        // printf("Diskpage Head: %x\n",request->header);
+        // printf("sequence %d\n",request->sequence);
+        // printf("lenth %d\n",request->length);
+        // printf("cmd %d\n",request->cmd);
+        // printf("aim %d\n",request->aim);
+        // printf("order %d\n",request->DiskPage_data.order);
+        // printf("total: %d\n \n",request->DiskPage_data.total);
+        // printf("diskcount %d\n",request->DiskPage_data.diskcount);
+        // printf("count: %d\n",request->DiskPage_data.count);
+        // printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[0].disklength);
+        // printf("Diskid: %d\n",request->DiskPage_data.diskStruct[0].disk_id);
+        // printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[0].unit);
+        // printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[0].total_size);
+        // printf("Diskused: %d\n",request->DiskPage_data.diskStruct[0].used_size);
+        // printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[0].temp);
+        // printf("Diskname: %s\n",request->DiskPage_data.diskStruct[0].name);
+        // if(disk_count-(i*2)>1)
+        // {
+        //     printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[1].disklength);
+        //     printf("Diskid: %d\n",request->DiskPage_data.diskStruct[1].disk_id);
+        //     printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[1].unit);
+        //     printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[1].total_size);
+        //     printf("Diskused: %d\n",request->DiskPage_data.diskStruct[1].used_size);
+        //     printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[1].temp);
+        //     printf("Diskname: %s\n",request->DiskPage_data.diskStruct[1].name);
+        // }
+        // printf("CRC:%d\n",request->DiskPage_data.crc);
+        // printf("Send %d time\n",(i+1));
+
+    }
+    printf("-----------------------------------DiskPage initial end-----------------------------------\n");
+    //ModePage
+    #if DebugToken
+    printf("-----------------------------------ModePage initial start-----------------------------------\n");
+    #endif
+    int modepage = first_init_hidreport(request, SET, ModePage_AIM, 255, 255);
+    append_crc(request);
+    if (safe_hid_write(handle, hid_report, modepage) == -1) {
+        printf("Failed to write ModePage data\n");
+    }
+    #if DebugToken
+    printf("-----------------------------------ModePage initial end-----------------------------------\n");
+    #endif
+    sleep(3);
+    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+
+    while (running) {
+        #if !IfNoPanel
+        if(HourTimeDiv % 20 == 0)
+        {
+            //1 Min Do
+            for (int i = 0; i < disk_count; i++) {
+                if (disks[i].temperature != -1) {
+                    int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
+
+                    append_crc(request);
+                    if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
+                    printf("Failed to write Disk data\n");
+                    break;
+                    }
+                    #if DebugToken
+                    printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
+                    #endif
+                    // printf("diskreportsize: %d\n",diskreportsize);
+                    // printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
+                    // printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
+                    // printf("Disktotal: %d\n",request->disk_data.disk_info.total_size);
+                    // printf("Diskused: %d\n",request->disk_data.disk_info.used_size);
+                    // printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
+                    // printf("DiskCRC: %d\n",request->disk_data.crc);
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    TimeSleep1Sec();
+                }
+            }
+            // Time
+            int timereportsize = init_hidreport(request, SET, TIME_AIM, 255);
+            append_crc(request);
+            if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
+                printf("Failed to write TIME data\n");
+                break;
+            }
+            memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+            TimeSleep1Sec();
+            #if DebugToken
+            printf("-----------------------------------TimeSendOK-----------------------------------\n");
+            #endif
+        }
         #endif
-        sleep(1);
+        #if !IfNoPanel
         //*****************************************************/
         // CPU
-        int cpureportsize = init_hidreport(request, SET, CPU_AIM);
+        int systemreportsize = init_hidreport(request, SET, System_AIM,0);
         append_crc(request);
-        if (safe_hid_write(handle, hid_report, cpureportsize) == -1) {
+        if (safe_hid_write(handle, hid_report, systemreportsize) == -1) {
             printf("Failed to write CPU data\n");
             break;
         }
-        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         #if DebugToken
-        printf("CPUSendOK\n");
+        printf("-----------------------------------CPUSendOK-----------------------------------\n");
         #endif
-        sleep(1);
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+        TimeSleep1Sec();
+
+
+        systemreportsize = init_hidreport(request, SET, System_AIM,1);        
+        append_crc(request);
+        if (safe_hid_write(handle, hid_report, systemreportsize) == -1) {
+            printf("Failed to write iGPU data\n");
+            break;
+        }
+        #if DebugToken
+        printf("-----------------------------------iGPUSendOK-----------------------------------\n");
+        #endif
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+        TimeSleep1Sec();
         //*****************************************************/
         // Memory Usage
-        int memusagesize = init_hidreport(request, SET, MEMORY_AIM);
+        int memusagesize = init_hidreport(request, SET, System_AIM,3);
         append_crc(request);
         if (safe_hid_write(handle, hid_report, memusagesize) == -1) {
             printf("Failed to write MEMORY data\n");
             break;
         }
+        #if DebugToken
+        printf("-----------------------------------MemorySendOK-----------------------------------\n");
+        #endif
         memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-        sleep(1);
+        TimeSleep1Sec();
         //*****************************************************/
         // User Online
-        int usersize = init_hidreport(request, SET, USER_AIM);
+        int usersize = init_hidreport(request, SET, USER_AIM,255);
         append_crc(request);
         if (safe_hid_write(handle, hid_report, usersize) == -1) {
             printf("Failed to write USER data\n");
             break;
         }
-        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         #if DebugToken
-        printf("UserSendOK\n");
+        printf("-----------------------------------UserSendOK-----------------------------------\n");
         #endif
-        sleep(1);
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+        TimeSleep1Sec();
         if(IsNvidiaGPU)
         {
-            int dgpusize = init_hidreport(request, SET, GPU_AIM);
+            int dgpusize = init_hidreport(request, SET, System_AIM,4);
             append_crc(request);
-            if (hid_write(handle, hid_report, dgpusize) == -1) {
-                break;
+            if (safe_hid_write(handle, hid_report, dgpusize) == -1) {
+                printf("Failed to write GPU data\n");
+            break;
             }
+            #if DebugToken
+            printf("-----------------------------------GPUSendOK-----------------------------------\n");
+            #endif
+            memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         }
-        sleep(1);
+        TimeSleep1Sec();
         //*****************************************************/
         //Get Error
-        int result = hid_read_timeout(handle, ack, 0x40, -1);
-        if (result == -1) {
-            break;
-        }
+        // int result = hid_read_timeout(handle, ack, 0x40, -1);
+        // if (result == -1) {
+        //     break;
+        // }
 
-        if (result > 0) {
-            parse_ack((Ack *)ack, request->aim);
-        }
-        if (hid_read(handle, hid_report, 0x40) == -1) {
-            break;
-        }
+        // if (result > 0) {
+        //     parse_ack((Ack *)ack, request->aim);
+        // }
+        // if (hid_read(handle, hid_report, 0x40) == -1) {
+        //     break;
+        // }
         #if DebugToken
         printf("ReadData:0x%02x\n",hid_report[1]);
         #endif
@@ -309,18 +482,27 @@ int main(void) {
         //*****************************************************/
         
         //*****************************************************/
-        sleep(DURATION);
+        TimeSleep1Sec();
     }
     // 释放内存
-    free(disks);
     #if !IfNoPanel
+    if (read_thread) {
+        pthread_join(read_thread, NULL);
+    }
     hid_close(handle);
     res = hid_exit();
     #endif
+    printf("程序已安全退出\n");
     return 0;
 }
-
-int init_hidreport(Request* request, unsigned char cmd, unsigned char aim) {
+void TimeSleep1Sec()
+{
+    if(HourTimeDiv == 3061)
+        HourTimeDiv = 0;
+    HourTimeDiv ++;
+    sleep(1);
+}
+int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char id) {
     request->header = SIGNATURE;
     request->cmd = cmd;
     request->aim = aim;
@@ -332,43 +514,104 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim) {
         request->length += sizeof(request->time_data);
         request->time_data.time_info.timestamp = time(NULL) + 28800;
         return offsetof(Request, time_data.crc) + 1;
-    case GPU_AIM:
-        request->length += sizeof(request->gpu_data);
-        // Code
-        unsigned char DGPUtemp = 0;
-        if(IsNvidiaGPU)
+    case System_AIM:
+        request->length += sizeof(request->system_data);
+        request->system_data.system_info.sys_id = id;
+        if(id == 0)
         {
-            DGPUtemp = nvidia_get_gpu_temperature();
-            request->gpu_data.gpu_info.temperature = DGPUtemp;
-            request->gpu_data.gpu_info.usage = nvidia_get_gpu_utilization();
-            request->gpu_data.gpu_info.rpm = nvidia_get_gpu_fan_speed();
+            // 读取当前CPU数据
+            read_cpu_data(&curr_data);
+            // 计算CPU使用率
+            //printf("CPU usage: %2f\n", calculate_cpu_usage(&prev_data, &curr_data));
+            request->system_data.system_info.usage = calculate_cpu_usage(&prev_data, &curr_data);
+            // 更新前一次的数据
+            prev_data = curr_data;
             // 获取 I/O 权限
             acquire_io_permissions();
-            ec_ram_write_byte(0xB0,DGPUtemp);
+            unsigned char CPU_fan = 0;
+            ec_ram_read_byte(0x70,&CPU_fan);
+            request->system_data.system_info.rpm = CPU_fan;
+            // 释放 I/O 权限
+            release_io_permissions();
+            
+        }
+        else if(id == 1)
+        {
+            request->system_data.system_info.usage = get_igpu_usage();
+            request->system_data.system_info.temerature = get_igpu_temperature();
+            acquire_io_permissions();
+            unsigned char CPU_fan = 0;
+            ec_ram_read_byte(0x70,&CPU_fan);
+            request->system_data.system_info.rpm = CPU_fan;
             // 释放 I/O 权限
             release_io_permissions();
         }
-        return offsetof(Request, gpu_data.crc) + 1;
-    case CPU_AIM:
+        else if(id == 2)
+        {
+            //memory
+            
+            request->system_data.system_info.usage = get_memory_usage();
+            request->system_data.system_info.temerature = 255;
+            request->system_data.system_info.rpm = 255;
+        }
+        else if (id == 3)
+        {
+            if(IsNvidiaGPU)
+            {
+                unsigned char DGPUtemp;
+                DGPUtemp = nvidia_get_gpu_temperature();
+                request->system_data.system_info.usage = nvidia_get_gpu_utilization();
+                request->system_data.system_info.temerature = DGPUtemp;
+                request->system_data.system_info.rpm = nvidia_get_gpu_fan_speed();
+                // 获取 I/O 权限
+                acquire_io_permissions();
+                ec_ram_write_byte(0xB0,DGPUtemp);
+                // 释放 I/O 权限
+                release_io_permissions();
+            }
+        }
+        return offsetof(Request, system_data.crc) + 1;
+    case Disk_AIM:
+        request->length += sizeof(request->disk_data);
+        request->disk_data.disk_info.disk_id = id;
+        request->disk_data.disk_info.unit = 3;
+        request->disk_data.disk_info.total_size = disks[id].total_size;
+        request->disk_data.disk_info.used_size = disks[id].used_size;
+        request->disk_data.disk_info.temp = disks[id].temperature;
+        return offsetof(Request, disk_data.crc) + 1;
+    // case GPU_AIM:
+    //     request->length += sizeof(request->gpu_data);
+    //     // Code
+    //     unsigned char DGPUtemp = 0;
+    //     if(IsNvidiaGPU)
+    //     {
+    //         DGPUtemp = nvidia_get_gpu_temperature();
+    //         request->gpu_data.gpu_info.temperature = DGPUtemp;
+    //         request->gpu_data.gpu_info.usage = nvidia_get_gpu_utilization();
+    //         request->gpu_data.gpu_info.rpm = nvidia_get_gpu_fan_speed();
+
+    //     }
+    //     return offsetof(Request, gpu_data.crc) + 1;
+    // case CPU_AIM:
         
-        request->length += sizeof(request->cpu_data);
-        // Code
-        request->cpu_data.cpu_info.temerature = get_cpu_temperature();
-        // 读取当前CPU数据
-        read_cpu_data(&curr_data);
-        // 计算CPU使用率
-        //printf("CPU usage: %2f\n", calculate_cpu_usage(&prev_data, &curr_data));
-        request->cpu_data.cpu_info.usage = calculate_cpu_usage(&prev_data, &curr_data);
-        // 更新前一次的数据
-        prev_data = curr_data;
-        // 获取 I/O 权限
-        acquire_io_permissions();
-        unsigned char CPU_fan = 0;
-        ec_ram_read_byte(0x70,&CPU_fan);
-        request->cpu_data.cpu_info.rpm = CPU_fan;
-        // 释放 I/O 权限
-        release_io_permissions();
-        return offsetof(Request, cpu_data.crc) + 1;
+        // request->length += sizeof(request->cpu_data);
+        // // Code
+        // request->cpu_data.cpu_info.temerature = get_cpu_temperature();
+        // // 读取当前CPU数据
+        // read_cpu_data(&curr_data);
+        // // 计算CPU使用率
+        // //printf("CPU usage: %2f\n", calculate_cpu_usage(&prev_data, &curr_data));
+        // request->cpu_data.cpu_info.usage = calculate_cpu_usage(&prev_data, &curr_data);
+        // // 更新前一次的数据
+        // prev_data = curr_data;
+        // // 获取 I/O 权限
+        // acquire_io_permissions();
+        // unsigned char CPU_fan = 0;
+        // ec_ram_read_byte(0x70,&CPU_fan);
+        // request->cpu_data.cpu_info.rpm = CPU_fan;
+        // // 释放 I/O 权限
+        // release_io_permissions();
+        // return offsetof(Request, cpu_data.crc) + 1;
     case USER_AIM:
         request->length += sizeof(request->user_data);
         // Code
@@ -388,19 +631,153 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim) {
         //printf("User Online Count:%d\n",user_count);
         request->user_data.user_info.online = user_count;
         return offsetof(Request, user_data.crc) + 1;
-    case MEMORY_AIM:
-        request->length += sizeof(request->memory_data);
-        // Code
-        request->memory_data.memory_info.usage = get_memory_usage();
-        return offsetof(Request, memory_data.crc) + 1;
-    
-    
     default:
         request->length += sizeof(request->common_data);
         return offsetof(Request, common_data.crc) + 1;
     }
 }
+void init_disk_struct(diskStruct* disk, const char* device_name) {
+    size_t len = strlen(device_name);
+    if (len > 255) len = 255;
+    
+    memcpy(disk->name, device_name, len);
+    disk->name[len] = '\0';
+    disk->disklength = (unsigned char)len;
+}
+int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char total,unsigned char order) {
+    request->header = SIGNATURE;
+    request->cmd = cmd;
+    request->aim = aim;
+    request->length = COMMLEN;
 
+    switch (aim)
+    {
+    case HomePage_AIM:
+        request->length += sizeof(request->Homepage_data);
+        request->Homepage_data.time_info.timestamp = time(NULL) + 28800;
+        request->Homepage_data.total = total;
+        request->Homepage_data.order = order;
+        return offsetof(Request, Homepage_data.crc) + 1;
+    case SystemPage_AIM:
+        request->length += sizeof(request->SystemPage_data);
+        request->SystemPage_data.order = order;
+        request->SystemPage_data.total = total;
+        if(IsNvidiaGPU)
+            request->SystemPage_data.syscount = 4;
+        else
+            request->SystemPage_data.syscount = 3;
+        if(order == 1)
+        {
+            request->SystemPage_data.count = 2;
+            // 读取当前CPU数据
+            read_cpu_data(&curr_data);
+            request->SystemPage_data.systemPage[0].syslength = sizeof(request->SystemPage_data.systemPage[0]);
+            request->SystemPage_data.systemPage[0].sys_id = 0; 
+            request->SystemPage_data.systemPage[0].usage = calculate_cpu_usage(&prev_data, &curr_data);
+            // 更新前一次的数据
+            prev_data = curr_data;
+            request->SystemPage_data.systemPage[0].temp = get_cpu_temperature();
+            // 获取 I/O 权限
+            acquire_io_permissions();
+            unsigned char CPU_fan = 0;
+            ec_ram_read_byte(0x70,&CPU_fan);
+            request->SystemPage_data.systemPage[0].rpm = CPU_fan;
+            request->SystemPage_data.systemPage[0].name[0] = 'C';
+            request->SystemPage_data.systemPage[0].name[1] = 'P';
+            request->SystemPage_data.systemPage[0].name[2] = 'U';
+            //CPU OK
+            request->SystemPage_data.systemPage[1].syslength = sizeof(request->SystemPage_data.systemPage[1]);
+            request->SystemPage_data.systemPage[1].sys_id = 1;
+            //Todo
+            request->SystemPage_data.systemPage[1].usage = get_igpu_usage();;
+            request->SystemPage_data.systemPage[1].temp = get_igpu_temperature();
+            request->SystemPage_data.systemPage[1].rpm = CPU_fan;
+            request->SystemPage_data.systemPage[1].name[0] = 'i';
+            request->SystemPage_data.systemPage[1].name[1] = 'G';
+            request->SystemPage_data.systemPage[1].name[2] = 'P';
+            request->SystemPage_data.systemPage[1].name[3] = 'U';
+        }
+        else if(order == 2)
+        {
+            request->SystemPage_data.systemPage[0].syslength = sizeof(request->SystemPage_data.systemPage[0]);
+            request->SystemPage_data.systemPage[0].sys_id = 3;
+            request->SystemPage_data.systemPage[0].usage = get_memory_usage();
+            request->SystemPage_data.systemPage[0].temp = 255;//No temp
+            request->SystemPage_data.systemPage[0].rpm = 255;//No fan
+            request->SystemPage_data.systemPage[0].name[0] = 'M';
+            request->SystemPage_data.systemPage[0].name[1] = 'e';
+            request->SystemPage_data.systemPage[0].name[2] = 'm';
+            request->SystemPage_data.systemPage[0].name[3] = 'o';
+            request->SystemPage_data.systemPage[0].name[4] = 'r';
+            request->SystemPage_data.systemPage[0].name[5] = 'y';
+            if(IsNvidiaGPU)
+            {
+                request->SystemPage_data.count = 2;
+            }
+            else
+                request->SystemPage_data.count = 1;
+        }
+        return offsetof(Request, SystemPage_data.crc) + 1;
+    case DiskPage_AIM:
+        printf("Diskpage order:%d\n",order);
+        request->length += sizeof(request->DiskPage_data);
+        request->DiskPage_data.diskcount = disk_count;
+        request->DiskPage_data.total = total;
+        request->DiskPage_data.order = order;
+        if((disk_count - (order-1)*2) == 1)
+        {
+            request->DiskPage_data.count = 1;
+            request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
+            request->DiskPage_data.diskStruct[0].unit = 3;
+            request->DiskPage_data.diskStruct[0].total_size = disks[(order - 1) * 2].total_size;
+            request->DiskPage_data.diskStruct[0].used_size = disks[(order - 1) * 2].used_size;
+            request->DiskPage_data.diskStruct[0].temp = disks[(order - 1) * 2].temperature;
+            //reserve name
+            for (int i = 0; i < sizeof(disks[(order - 1) * 2].device); i++)
+            {
+                request->DiskPage_data.diskStruct[0].name[i] = disks[(order - 1) * 2].device[i];
+            }
+            request->DiskPage_data.diskStruct[0].name[sizeof(disks[(order - 1) * 2].device) + 1] = 0;
+            request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
+        }
+        else
+        {
+            //First
+            request->DiskPage_data.count = 2;
+            request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2;//id >= 0
+            request->DiskPage_data.diskStruct[0].unit = 3;
+            request->DiskPage_data.diskStruct[0].total_size = disks[(order - 1) * 2].total_size;
+            request->DiskPage_data.diskStruct[0].used_size = disks[(order - 1) * 2].used_size;
+            request->DiskPage_data.diskStruct[0].temp = disks[(order - 1) * 2].temperature;
+            for (int i = 0; i < sizeof(disks[(order - 1) * 2].device); i++)
+            {
+                request->DiskPage_data.diskStruct[0].name[i] = disks[(order - 1) * 2].device[i];
+            }
+            request->DiskPage_data.diskStruct[0].name[sizeof(disks[(order - 1) * 2].device) + 1] = 0;
+            request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
+            //Second
+            request->DiskPage_data.diskStruct[1].disk_id = 1 + (order - 1) * 2;
+            request->DiskPage_data.diskStruct[1].unit = 3;
+            request->DiskPage_data.diskStruct[1].total_size = disks[(order - 1) * 2 +1].total_size;
+            request->DiskPage_data.diskStruct[1].used_size = disks[(order - 1) * 2 + 1].used_size;
+            request->DiskPage_data.diskStruct[1].temp = disks[(order - 1) * 2 + 1].temperature;
+            for (int i = 0; i < sizeof(disks[(order - 1) * 2 + 1].device); i++)
+            {
+                request->DiskPage_data.diskStruct[1].name[i] = disks[(order - 1) * 2 + 1].device[i];
+            }
+            request->DiskPage_data.diskStruct[1].name[sizeof(disks[(order - 1) * 2 + 1].device) + 1] = 0;
+            request->DiskPage_data.diskStruct[1].disklength = sizeof(request->DiskPage_data.diskStruct[1]);
+        }
+        return offsetof(Request, DiskPage_data.crc) + 1;
+    case ModePage_AIM:
+        request->ModePage_data.mute = 1;
+        request->ModePage_data.properties = 1;
+        request->ModePage_data.balance = 1;
+        return offsetof(Request, ModePage_data.crc) + 1;
+    default:
+        return 0;
+    }
+}
 void append_crc(Request *request) {
     int len = 0;
     int off = 0;
@@ -408,30 +785,33 @@ void append_crc(Request *request) {
     switch (request->aim)
     {
         case TIME_AIM:
-
             len = offsetof(Request, time_data.crc);
             request->time_data.crc = cal_crc((unsigned char *)request, len);
             return;
-
-        case GPU_AIM:
-
-            len = offsetof(Request, gpu_data.crc);
-            request->gpu_data.crc = cal_crc((unsigned char *)request, len);
+        case SystemPage_AIM:
+            len = offsetof(Request, SystemPage_data.crc);
+            request->SystemPage_data.crc = cal_crc((unsigned char *)request, len);
             return;
-
-        case CPU_AIM:
-
-            len = offsetof(Request, cpu_data.crc);
-            request->cpu_data.crc = cal_crc((unsigned char *)request, len);
+        case System_AIM:
+            len = offsetof(Request, system_data.crc);
+            request->system_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case DiskPage_AIM:
+            len = offsetof(Request, DiskPage_data.crc);
+            request->DiskPage_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case Disk_AIM:
+            len = offsetof(Request, disk_data.crc);
+            request->disk_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case NetworkPage_AIM:
+            len = offsetof(Request, NetworkPage_data.crc);
+            request->NetworkPage_data.crc = cal_crc((unsigned char *)request, len);
             return;
 
         case USER_AIM:
             len = offsetof(Request, user_data.crc);
             request->user_data.crc = cal_crc((unsigned char *)request, len);
-            return;
-        case MEMORY_AIM:
-            len = offsetof(Request, memory_data.crc);
-            request->memory_data.crc = cal_crc((unsigned char *)request, len);
             return;
 
         default:
@@ -448,7 +828,9 @@ unsigned char cal_crc(unsigned char * data, int len) {
 
     for (; off < len; off++) {
         crc += *((unsigned char *)(data) + off);
+        printf("%d ",*((unsigned char *)(data) + off));
     }
+    printf("\n");
 
     return (unsigned char)(crc & 0xff);
 }
@@ -516,6 +898,75 @@ float calculate_cpu_usage(const CPUData *prev, const CPUData *curr) {
     //printf("CPU total_delta: %ld, idle_delta: %ld\n", total_delta, idle_delta);
     return (total_delta - idle_delta) * 100.0 / total_delta;
 }
+// 获取iGPU温度（摄氏度）
+int get_igpu_temperature() {
+    FILE *file;
+    char path[512];//Use 512
+    char line[256];
+    
+    // 直接尝试已知的AMD温度传感器路径
+    const char *temp_patterns[] = {
+        "/sys/class/drm/card0/device/hwmon/hwmon*/temp1_input",
+        "/sys/class/drm/card1/device/hwmon/hwmon*/temp1_input",
+        "/sys/class/hwmon/hwmon*/temp1_input",
+        NULL
+    };
+    
+    for (int i = 0; temp_patterns[i] != NULL; i++) {
+        // 使用glob处理通配符
+        glob_t globbuf;
+        if (glob(temp_patterns[i], 0, NULL, &globbuf) == 0) {
+            for (size_t j = 0; j < globbuf.gl_pathc; j++) {
+                // 检查路径长度
+                if (strlen(globbuf.gl_pathv[j]) >= 512) {
+                    continue;
+                }
+                
+                file = fopen(globbuf.gl_pathv[j], "r");
+                if (file) {
+                    if (fgets(line, sizeof(line), file)) {
+                        int temp = atoi(line) / 1000;
+                        fclose(file);
+                        globfree(&globbuf);
+                        return temp;
+                    }
+                    fclose(file);
+                }
+            }
+            globfree(&globbuf);
+        }
+    }
+    
+    return -1;
+}
+
+// 获取iGPU使用率
+float get_igpu_usage() {
+    FILE *file;
+    char path[512];
+    char line[256];
+    
+    const char *usage_paths[] = {
+        "/sys/class/drm/card0/device/gpu_busy_percent",
+        "/sys/class/drm/card1/device/gpu_busy_percent",
+        "/sys/class/drm/card2/device/gpu_busy_percent",
+        NULL
+    };
+    
+    for (int i = 0; usage_paths[i] != NULL; i++) {
+        file = fopen(usage_paths[i], "r");
+        if (file) {
+            if (fgets(line, sizeof(line), file)) {
+                float usage = atof(line);
+                fclose(file);
+                return usage;
+            }
+            fclose(file);
+        }
+    }
+    
+    return -1.0;
+}
 //ReadMemory Useage
 unsigned int get_memory_usage(){
     struct sysinfo info;
@@ -550,9 +1001,6 @@ void parse_ack(Ack *ack, unsigned char aim) {
 
         case USER_AIM:
             len = offsetof(Ack, user_data.crc);
-            break;
-        case MEMORY_AIM:
-            len = offsetof(Ack, about_data.crc);
             break;
 
         default:
@@ -781,15 +1229,15 @@ int scan_disk_devices(disk_info_t *disks, int max_disks) {
                             disks[disk_count].model, 
                             disks[disk_count].serial);
             
-            disks[disk_count].total_size = get_disk_size(entry->d_name);
+            disks[disk_count].total_size = get_disk_size(entry->d_name)/1024/1024/1024;//Change to Gb
             get_mountpoint(entry->d_name, disks[disk_count].mountpoint);
             // 如果有挂载点，获取使用情况
             if (strlen(disks[disk_count].mountpoint) > 0) {
                 
                 unsigned long long total, free, used;
                 if (get_mountpoint_usage(disks[disk_count].mountpoint, &total, &free, &used) == 0) {
-                    disks[disk_count].free_size = free;
-                    disks[disk_count].used_size = used;
+                    disks[disk_count].free_size = free/1024/1024/1024;//Change to Gb
+                    disks[disk_count].used_size = used/1024/1024/1024;//Change to Gb
                     if (total > 0) {
                         disks[disk_count].usage_percent = ((double)used / total) * 100.0;
                     }
@@ -1223,12 +1671,13 @@ void* hid_read_thread(void *arg) {
         int res = hid_read(handle, read_buf, sizeof(read_buf));
         
         if (res > 0) {
-            printf("HID Received %d bytes: ", res);
-            for (int i = 0; i < res; i++) {
-                printf("%02x ", read_buf[i]);
-            }
-            printf("\n");
-            
+            #if DebugToken
+            // printf("HID Received %d bytes: ", res);
+            // for (int i = 0; i < res; i++) {
+            //     printf("%02x ", read_buf[i]);
+            // }
+            // printf("\n");
+            #endif
             // 检测心跳包
             if (res >= 7 && 
                 read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
@@ -1241,13 +1690,16 @@ void* hid_read_thread(void *arg) {
             // 检测其他命令...
             else if (res >= 6 && 
                      read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
-                     read_buf[2] == 0xff && read_buf[3] == 0x08 &&
-                     read_buf[4] == 0x00 && read_buf[5] == 0x01) {
-                printf(">>> SHUTDOWN command received!\n");
+                     read_buf[2] == 0x00 && read_buf[3] == 0x06 &&
+                     read_buf[4] == 0x02 && read_buf[5] == 0x81 &&
+                     read_buf[6] == 0x3C && read_buf[7] == 0x00 &&
+                    read_buf[8] == 0xC4) {
+                printf(">>> Hibernate 60S command received!\n");
+                systemoperation(HIBERNATEATONCE_AIM,60);
                 system("shutdown -h now");
             }
             else {
-                printf(">>> Other command/data\n");
+                //printf(">>> Other command/data\n");
             }
             
             memset(read_buf, 0, sizeof(read_buf));
@@ -1265,7 +1717,132 @@ void* hid_read_thread(void *arg) {
 // 线程安全的写入函数
 int safe_hid_write(hid_device *handle, const unsigned char *data, int length) {
     pthread_mutex_lock(&hid_mutex);
+    printf("Safe hid write\n");
     int result = hid_write(handle, data, length);
     pthread_mutex_unlock(&hid_mutex);
     return result;
+}
+void big_to_little_inplace(unsigned char *data, size_t size) {
+    unsigned char temp;
+    for (size_t i = 0; i < size / 2; i++) {
+        temp = data[i];
+        data[i] = data[size - 1 - i];
+        data[size - 1 - i] = temp;
+    }
+}
+void systemoperation(unsigned char time,unsigned char cmd)
+{
+    char *command = NULL;
+    for (unsigned char i = 0; i < time; i++)
+    {
+        TimeSleep1Sec();
+    }
+    switch (cmd)
+    {
+    case HIBERNATEATONCE_AIM:
+        command = "systemctl hibernate";
+        break;
+    
+    default:
+        break;
+    }
+    system(command);
+}
+void scan_network_interfaces() {
+    DIR *dir;
+    struct dirent *entry;
+    char path[512];
+    FILE *file;
+    char line[256];
+    
+    printf("=== 网络接口概览 ===\n");
+    
+    dir = opendir("/sys/class/net");
+    if (!dir) {
+        perror("无法访问 /sys/class/net");
+        return;
+    }
+    
+    int count = 0;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        
+        count++;
+        printf("%d. %s\n", count, entry->d_name);
+        
+        // 检查操作状态
+        snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", entry->d_name);
+        file = fopen(path, "r");
+        if (file) {
+            if (fgets(line, sizeof(line), file)) {
+                line[strcspn(line, "\n")] = 0;
+                printf("   状态: %s\n", line);
+            }
+            fclose(file);
+        }
+        
+        // 检查速度
+        snprintf(path, sizeof(path), "/sys/class/net/%s/speed", entry->d_name);
+        file = fopen(path, "r");
+        if (file) {
+            if (fgets(line, sizeof(line), file)) {
+                int speed = atoi(line);
+                if (speed > 0) {
+                    printf("   当前速度: %d Mbps\n", speed);
+                } else {
+                    printf("   当前速度: 未连接\n");
+                }
+            }
+            fclose(file);
+        } else {
+            printf("   当前速度: 无法获取\n");
+        }
+        
+        // 检查IP地址
+        snprintf(path, sizeof(path), "/sys/class/net/%s/address", entry->d_name);
+        file = fopen(path, "r");
+        if (file) {
+            if (fgets(line, sizeof(line), file)) {
+                printf("   MAC地址: %s", line);
+            }
+            fclose(file);
+        }
+        
+        printf("\n");
+    }
+    
+    closedir(dir);
+    
+    if (count == 0) {
+        printf("未发现网络接口\n");
+    }
+}
+
+// 获取默认网关和DNS
+void get_network_config() {
+    FILE *file;
+    char line[256];
+    
+    printf("=== 网络配置 ===\n");
+    
+    // 获取默认网关
+    file = popen("ip route | grep default", "r");
+    if (file) {
+        printf("默认网关:\n");
+        while (fgets(line, sizeof(line), file)) {
+            printf("  %s", line);
+        }
+        pclose(file);
+    }
+    
+    printf("\nDNS服务器:\n");
+    file = fopen("/etc/resolv.conf", "r");
+    if (file) {
+        while (fgets(line, sizeof(line), file)) {
+            if (strncmp(line, "nameserver", 10) == 0) {
+                printf("  %s", line);
+            }
+        }
+        fclose(file);
+    }
 }
