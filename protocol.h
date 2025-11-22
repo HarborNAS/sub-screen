@@ -14,6 +14,11 @@ typedef struct __attribute__((__packed__)) {
 } User;
 
 typedef struct __attribute__((__packed__)) {
+    unsigned char unit;
+    unsigned short uploadspeed;
+    unsigned short downloadspeed;
+} Wlanspeed;
+typedef struct __attribute__((__packed__)) {
     unsigned char sys_id;
     unsigned char usage;
     unsigned char temerature;
@@ -52,6 +57,15 @@ typedef struct {
     unsigned char temp;         //Default -1
     char name[16];              //Default -1
 } diskStruct;
+typedef struct {
+    unsigned char id;
+    unsigned char unit;
+    unsigned short uploadspeed;
+    unsigned short downloadspeed;
+    unsigned short totalflow;
+    unsigned char ip[4];
+    unsigned char name[20];
+} WlanPage;
 typedef struct __attribute__((__packed__)) {
     unsigned char count;
     diskStruct disk[2];
@@ -88,7 +102,10 @@ typedef struct __attribute__((__packed__)) {
             User user_info;
             unsigned char crc;
         } user_data;
-
+        struct __attribute__((__packed__)) {
+            Wlanspeed speed_info;
+            unsigned char crc;
+        } speed_data;
         struct __attribute__((__packed__))
         {
             Memory memory_info;
@@ -122,10 +139,13 @@ typedef struct __attribute__((__packed__)) {
         struct __attribute__((__packed__)){
             unsigned char order;
             unsigned char total;
-            unsigned char diskcount;
+            unsigned char netcount;
             unsigned char count;
+            unsigned char online;
+            unsigned char length;
+            WlanPage wlanPage;
             unsigned char crc;
-        } NetworkPage_data;
+        } WlanPage_data;
         struct __attribute__((__packed__)){
             unsigned char order;
             unsigned char total;
@@ -199,8 +219,11 @@ typedef struct __attribute__((__packed__)) {
 #define System_AIM 0x11
 #define DiskPage_AIM 0x50
 #define Disk_AIM 0x51
-#define NetworkPage_AIM 0x60
+#define WlanPage_AIM 0x60
 #define USER_AIM 0x61
+#define WlanSpeed_AIM 0x62
+#define WlanTotal_AIM 0x64
+#define WlanIP_AIM 0x65
 #define ModePage_AIM 0x70
 #define Mute_AIM 0x71
 #define Properties_AIM 0x72
