@@ -12,7 +12,6 @@ typedef struct __attribute__((__packed__)) {
 typedef struct __attribute__((__packed__)) {
     unsigned short online;
 } User;
-
 typedef struct __attribute__((__packed__)) {
     unsigned char unit;
     unsigned short uploadspeed;
@@ -62,7 +61,6 @@ typedef struct {
     unsigned char unit;
     unsigned short uploadspeed;
     unsigned short downloadspeed;
-    unsigned short totalflow;
     unsigned char ip[4];
     unsigned char name[20];
 } WlanPage;
@@ -149,6 +147,21 @@ typedef struct __attribute__((__packed__)) {
         struct __attribute__((__packed__)){
             unsigned char order;
             unsigned char total;
+            unsigned short nouse;
+            unsigned char count;
+            unsigned char devnamelength;
+            unsigned char devname[32];
+            unsigned char cpunamelength;
+            unsigned char cpuname[32];
+            unsigned char operatelength;
+            unsigned char operate[32];
+            unsigned char snlength;
+            unsigned char sn[8];
+            unsigned char crc;
+        } InfoPage_data;
+        struct __attribute__((__packed__)){
+            unsigned char order;
+            unsigned char total;
             unsigned char powcount;
             unsigned char count;
             unsigned char mute;
@@ -214,7 +227,6 @@ typedef struct __attribute__((__packed__)) {
 // AIM
 #define HomePage_AIM 0x00
 #define TIME_AIM 0x01
-
 #define SystemPage_AIM 0x10
 #define System_AIM 0x11
 #define DiskPage_AIM 0x50
@@ -228,21 +240,5 @@ typedef struct __attribute__((__packed__)) {
 #define Mute_AIM 0x71
 #define Properties_AIM 0x72
 #define Balance_AIM 0x73
-// AIM SIDESCREEN
-#define NOTIFY_AIM 0x40
-#define COMPONENT_AIM 0x41
-
-
-// AIM SIDESCREENCONF
-#define BRIGHTNESS_AIM 0x42
-#define DISPLAYMODE_AIM 0x43
-#define CHANGESKIN_AIM 0x44
-#define ABOUT_AIM 0x45
-
-// AIM HIBERNATE
-#define COUNTDOWN_AIM 0x50
-#define HIBERNATECANCEL_AIM 0x51
 #define HIBERNATEATONCE_AIM 0x81
-
-// AIM SYSTEM
-
+#define InfoPage_AIM 0xA0

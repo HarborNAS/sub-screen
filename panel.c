@@ -45,7 +45,7 @@
 #define DebugToken   true
 #define SensorLog   true
 #define IfNoPanel   false
-#define hidwritedebug false
+#define hidwritedebug true
 #define MAXLEN 0x40
 #define PRODUCTID 0x0002
 #define VENDORID 0x5448
@@ -113,7 +113,6 @@ typedef struct {
     int mtu;                      // MTU值
     unsigned long long rx_bytes;  // 接收字节数
     unsigned long long tx_bytes;  // 发送字节数
-    char driver[64];              // 驱动名称
 } network_interface_t;
 typedef struct {
     unsigned long long total_rx;  // 系统总接收字节
@@ -135,8 +134,6 @@ float calculate_cpu_usage(const CPUData *prev, const CPUData *curr);
 int get_igpu_temperature();
 float get_igpu_usage();
 unsigned int get_memory_usage();
-void parse_request(Request *request);
-void parse_ack(Ack *ack, unsigned char aim);
 int GetUserCount();
 int file_exists(const char *filename);
 int read_file(const char *filename, char *buffer, size_t buffer_size);
@@ -161,28 +158,17 @@ int ec_ram_write_byte(unsigned char address, unsigned char value);
 int ec_ram_read_block(unsigned char start_addr, unsigned char *buffer, int length);
 int ec_ram_write_block(unsigned char start_addr, unsigned char *data, int length);
 int ec_query_version(char *version, int max_len);
-//Memory
-volatile uint32_t* map_apic_memory();
-void unmap_apic_memory(volatile uint32_t* addr);
-uint32_t RMem32(volatile uint32_t* base, uint32_t offset);
-void WMem32(volatile uint32_t* base, uint32_t offset, uint32_t value);
-int DisableSci();
-int EnableSci();
-volatile uint32_t* map_physical_memory(uint64_t phys_addr, size_t size);
-void unmap_physical_memory(volatile uint32_t* addr, size_t size);
 void nvidia_print_info();
 //异步HID
 void signal_handler(int sig);
 void* hid_read_thread(void *arg);
 int safe_hid_write(hid_device *handle, const unsigned char *data, int length);
-void big_to_little_inplace(unsigned char *data, size_t size);
 void systemoperation(unsigned char time,unsigned char cmd);
 int is_physical_interface(const char *ifname);
 void get_interface_basic_info(const char *ifname, network_interface_t *iface);
 void get_interface_ip_info(const char *ifname, network_interface_t *iface);
 void get_interface_speed_info(const char *ifname, network_interface_t *iface);
 void get_interface_stats(const char *ifname, network_interface_t *iface);
-void get_driver_info(const char *ifname, network_interface_t *iface);
 int scan_network_interfaces();
 void print_interface_info(const network_interface_t *iface);
 void print_all_interfaces();
@@ -219,6 +205,14 @@ int nvidia_smi_available();
 int nvidia_get_gpu_temperature();
 int nvidia_get_gpu_utilization();
 int nvidia_get_gpu_fan_speed();
+typedef struct {
+    char devicename[64];
+    char cpuname[128];
+    char operatename[128];
+    char serial_number[64];
+} system_info_t;
+void get_system_info(system_info_t *info);
+system_info_t sys_info;
 int main(void) {
     // 设置信号处理
     #if !IfNoPanel
@@ -423,7 +417,7 @@ int main(void) {
     int wlanpage;
     for (int i = 0; i < wlancount; i++)
     {
-        wlanpage = first_init_hidreport(request, SET, WlanPage_AIM, wlancount, i);
+        wlanpage = first_init_hidreport(request, SET, WlanPage_AIM, wlancount, i + 1);
         append_crc(request);
         if (safe_hid_write(handle, hid_report, wlanpage) == -1) {
             printf("Failed to write WlanPage data\n");
@@ -436,9 +430,22 @@ int main(void) {
     printf("-----------------------------------WLANPage initial end-----------------------------------\n");
     #endif
 
+    get_system_info(&sys_info);
+    #if DebugToken
+    printf("-----------------------------------InfoPage initial start-----------------------------------\n");
+    #endif
+    int infopage = first_init_hidreport(request, SET, InfoPage_AIM, 1, 1);
+    append_crc(request);
+    if (safe_hid_write(handle, hid_report, infopage) == -1) {
+        printf("Failed to write InfoPage data\n");
+    }
+    sleep(3);
+    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    #if DebugToken
+    printf("-----------------------------------InfoPage initial end-----------------------------------\n");
+    #endif
 
 
-    
     while (running) {
         #if !IfNoPanel
         if(HourTimeDiv % 60 == 0)
@@ -722,14 +729,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         return offsetof(Request, common_data.crc) + 1;
     }
 }
-void init_disk_struct(diskStruct* disk, const char* device_name) {
-    size_t len = strlen(device_name);
-    if (len > 255) len = 255;
-    
-    memcpy(disk->name, device_name, len);
-    disk->name[len] = '\0';
-    disk->disklength = (unsigned char)len;
-}
+
 int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char total,unsigned char order) {
     request->header = SIGNATURE;
     request->cmd = cmd;
@@ -855,23 +855,25 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         }
         return offsetof(Request, DiskPage_data.crc) + 1;
     case ModePage_AIM:
+        request->length += sizeof(request->ModePage_data);
         request->ModePage_data.mute = 1;
         request->ModePage_data.properties = 1;
         request->ModePage_data.balance = 1;
         return offsetof(Request, ModePage_data.crc) + 1;
     case WlanPage_AIM:
+        request->length += sizeof(request->WlanPage_data);
         request->WlanPage_data.order = order;
         request->WlanPage_data.total = total;
         request->WlanPage_data.netcount = total;
         request->WlanPage_data.count = 1;
         request->WlanPage_data.online = GetUserCount();
-        request->WlanPage_data.length = sizeof(WlanPage);
+        request->WlanPage_data.length = sizeof(request->WlanPage_data.wlanPage);
         request->WlanPage_data.wlanPage.id = order;
         request->WlanPage_data.wlanPage.unit = 3;
         get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
         request->WlanPage_data.wlanPage.uploadspeed = tx_speed;
         request->WlanPage_data.wlanPage.downloadspeed = rx_speed;
-        request->WlanPage_data.wlanPage.totalflow = traffic.total_rx / 1024 / 1024 + traffic.total_tx / 1024 /1024;
+        //request->WlanPage_data.wlanPage.totalflow = traffic.total_rx / 1024 / 1024 + traffic.total_tx / 1024 /1024;
         request->WlanPage_data.wlanPage.ip[0] = wlaninterfaces[order].ip_address[0];
         request->WlanPage_data.wlanPage.ip[1] = wlaninterfaces[order].ip_address[1];
         request->WlanPage_data.wlanPage.ip[2] = wlaninterfaces[order].ip_address[2];
@@ -881,6 +883,34 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             request->WlanPage_data.wlanPage.name[i] = wlaninterfaces[order].name[i];
         }
         return offsetof(Request, WlanPage_data.crc) + 1;
+    case InfoPage_AIM:
+        request->length += sizeof(request->InfoPage_data);
+        request->InfoPage_data.order = order;
+        request->InfoPage_data.total = total;
+        request->InfoPage_data.nouse = 0;
+        request->InfoPage_data.count = 0;
+        int i = 0;
+        request->InfoPage_data.devnamelength = sizeof(request->InfoPage_data.devname);
+        for (i = 0; i < sizeof(request->InfoPage_data.devname); i++)
+        {
+            request->InfoPage_data.devname[i] = sys_info.devicename[i];
+        }
+        request->InfoPage_data.cpunamelength = sizeof(request->InfoPage_data.cpuname);
+        for (i = 0; i < sizeof(request->InfoPage_data.cpuname); i++)
+        {
+            request->InfoPage_data.cpuname[i] = sys_info.cpuname[i];
+        }
+        request->InfoPage_data.operatelength = sizeof(request->InfoPage_data.operate);
+        for (i = 0; i < sizeof(request->InfoPage_data.operate); i++)
+        {
+            request->InfoPage_data.operate[i] = sys_info.operatename[i];
+        }
+        request->InfoPage_data.snlength = sizeof(request->InfoPage_data.sn);
+        for (i = 0; i < sizeof(request->InfoPage_data.sn); i++)
+        {
+            request->InfoPage_data.sn[i] = sys_info.serial_number[i];
+        }
+        return offsetof(Request, InfoPage_data.crc) + 1;
     default:
         return 0;
     }
@@ -915,7 +945,10 @@ void append_crc(Request *request) {
             len = offsetof(Request, WlanPage_data.crc);
             request->WlanPage_data.crc = cal_crc((unsigned char *)request, len);
             return;
-
+        case InfoPage_AIM:
+            len = offsetof(Request, InfoPage_data.crc);
+            request->InfoPage_data.crc = cal_crc((unsigned char *)request, len);
+            return;
         case USER_AIM:
             len = offsetof(Request, user_data.crc);
             request->user_data.crc = cal_crc((unsigned char *)request, len);
@@ -947,6 +980,7 @@ unsigned char cal_crc(unsigned char * data, int len) {
     #endif
     return (unsigned char)(crc & 0xff);
 }
+
 int get_cpu_temperature() {
     FILE *thermal_file;
     int temperature = 0;
@@ -1095,43 +1129,43 @@ unsigned int get_memory_usage(){
     }
 }
 
-void parse_request(Request *request) {
-    for (int off = 0; off < 0x40; off++) {
-        printf("%d ", *(((unsigned char *)request) + off));
-    }
-    printf("\n");
-    printf("length: %u\n", request->length);
-}
+// void parse_request(Request *request) {
+//     for (int off = 0; off < 0x40; off++) {
+//         printf("%d ", *(((unsigned char *)request) + off));
+//     }
+//     printf("\n");
+//     printf("length: %u\n", request->length);
+// }
 
-void parse_ack(Ack *ack, unsigned char aim) {
-    int len = 0;
-    switch (aim)
-    {
-        case TIME_AIM:
+// void parse_ack(Ack *ack, unsigned char aim) {
+//     int len = 0;
+//     switch (aim)
+//     {
+//         case TIME_AIM:
 
-            len = offsetof(Ack, time_data.crc);
-            break;
+//             len = offsetof(Ack, time_data.crc);
+//             break;
 
-        case USER_AIM:
-            len = offsetof(Ack, user_data.crc);
-            break;
+//         case USER_AIM:
+//             len = offsetof(Ack, user_data.crc);
+//             break;
 
-        default:
-            len = offsetof(Ack, common_data.crc);
-            break;
-    }
+//         default:
+//             len = offsetof(Ack, common_data.crc);
+//             break;
+//     }
 
-    for (int off = 0; off < len; off++) {
-        printf("%u ", *(((unsigned char *)ack) + off));
-    }
-    printf("\n");
+//     for (int off = 0; off < len; off++) {
+//         printf("%u ", *(((unsigned char *)ack) + off));
+//     }
+//     printf("\n");
 
-    printf("[debug] ack->header: %x\n", ack->header);
-    printf("[debug] ack->sequence: %x\n", ack->sequence);
-    printf("[debug] ack->length: %x\n", ack->length);
-    printf("[debug] ack->cmd: %x\n", ack->cmd);
-    printf("[debug] ack->err: %x\n", ack->err);
-}
+//     printf("[debug] ack->header: %x\n", ack->header);
+//     printf("[debug] ack->sequence: %x\n", ack->sequence);
+//     printf("[debug] ack->length: %x\n", ack->length);
+//     printf("[debug] ack->cmd: %x\n", ack->cmd);
+//     printf("[debug] ack->err: %x\n", ack->err);
+// }
 //Disk
 int file_exists(const char *filename) {
     struct stat st;
@@ -1530,115 +1564,6 @@ int ec_query_version(char *version, int max_len) {
     return 0;
 }
 
-volatile uint32_t* map_apic_memory() {
-    int fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (fd < 0) {
-        perror("打开/dev/mem失败");
-        return NULL;
-    }
-    
-    void* mapped = mmap(NULL, 4096, PROT_READ | PROT_WRITE, 
-                       MAP_SHARED, fd, APIC_ADDRESS);
-    close(fd);
-    
-    if (mapped == MAP_FAILED) {
-        perror("内存映射失败");
-        return NULL;
-    }
-    
-    return (volatile uint32_t*)mapped;
-}
-
-void unmap_apic_memory(volatile uint32_t* addr) {
-    if (addr) {
-        munmap((void*)addr, 4096);
-    }
-}
-
-// 读取32位内存
-uint32_t RMem32(volatile uint32_t* base, uint32_t offset) {
-    return *(base + (offset / sizeof(uint32_t)));
-}
-
-// 写入32位内存
-void WMem32(volatile uint32_t* base, uint32_t offset, uint32_t value) {
-    *(base + (offset / sizeof(uint32_t))) = value;
-}
-
-int DisableSci() {
-    volatile uint32_t* apic_base = map_physical_memory(APIC_ADDRESS, 0x1000);
-    if (!apic_base) {
-        fprintf(stderr, "无法映射APIC内存\n");
-        return 0;
-    }
-    
-    uint32_t v = (2 * APIC_IRQ) + 0x10;
-    WMem32(apic_base, v, 0);  // 写入偏移地址
-    
-    uint32_t sci = RMem32(apic_base, 0x10);
-    printf("当前SCI值: 0x%08X\n", sci);
-    
-    sci |= 0x00010000;  // 设置屏蔽位
-    WMem32(apic_base, 0x10, sci);
-    
-    printf("禁用SCI后的值: 0x%08X\n", RMem32(apic_base, 0x10));
-    
-    unmap_physical_memory(apic_base, 0x1000);
-    return 1;
-}
-
-int EnableSci() {
-    volatile uint32_t* apic_base = map_physical_memory(APIC_ADDRESS, 0x1000);
-    if (!apic_base) {
-        fprintf(stderr, "无法映射APIC内存\n");
-        return 0;
-    }
-    
-    uint32_t v = (2 * APIC_IRQ) + 0x10;
-    WMem32(apic_base, v, 0);  // 写入偏移地址
-    
-    uint32_t sci = RMem32(apic_base, 0x10);
-    printf("当前SCI值: 0x%08X\n", sci);
-    
-    sci &= 0xFFFEFFFF;  // 清除屏蔽位
-    WMem32(apic_base, 0x10, sci);
-    
-    printf("启用SCI后的值: 0x%08X\n", RMem32(apic_base, 0x10));
-    
-    unmap_physical_memory(apic_base, 0x1000);
-    return 1;
-}
-// 映射物理内存到用户空间
-volatile uint32_t* map_physical_memory(uint64_t phys_addr, size_t size) {
-    int mem_fd;
-    void *mapped_addr;
-    
-    // 打开 /dev/mem
-    mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (mem_fd < 0) {
-        perror("无法打开 /dev/mem");
-        return NULL;
-    }
-    
-    // 映射物理内存
-    mapped_addr = mmap(NULL, size, PROT_READ | PROT_WRITE, 
-                      MAP_SHARED, mem_fd, phys_addr);
-    close(mem_fd);
-    
-    if (mapped_addr == MAP_FAILED) {
-        perror("内存映射失败");
-        return NULL;
-    }
-    
-    return (volatile uint32_t*)mapped_addr;
-}
-
-// 解除内存映射
-void unmap_physical_memory(volatile uint32_t* addr, size_t size) {
-    if (addr) {
-        munmap((void*)addr, size);
-    }
-}
 // 检查nvidia-smi是否可用
 int nvidia_smi_available() {
     return system("which nvidia-smi > /dev/null 2>&1") == 0;
@@ -1861,14 +1786,7 @@ int safe_hid_write(hid_device *handle, const unsigned char *data, int length) {
     pthread_mutex_unlock(&hid_mutex);
     return result;
 }
-void big_to_little_inplace(unsigned char *data, size_t size) {
-    unsigned char temp;
-    for (size_t i = 0; i < size / 2; i++) {
-        temp = data[i];
-        data[i] = data[size - 1 - i];
-        data[size - 1 - i] = temp;
-    }
-}
+
 void systemoperation(unsigned char time,unsigned char cmd)
 {
     char *command = NULL;
@@ -2076,28 +1994,6 @@ void get_interface_stats(const char *ifname, network_interface_t *iface) {
     fclose(file);
 }
 
-// 获取驱动信息
-void get_driver_info(const char *ifname, network_interface_t *iface) {
-    char path[256];
-    char driver_path[256];
-    
-    if (!iface->is_physical) {
-        strcpy(iface->driver, "虚拟接口");
-        return;
-    }
-    
-    snprintf(path, sizeof(path), "/sys/class/net/%s/device/driver", ifname);
-    if (readlink(path, driver_path, sizeof(driver_path) - 1) > 0) {
-        char *driver_name = strrchr(driver_path, '/');
-        if (driver_name) {
-            strncpy(iface->driver, driver_name + 1, sizeof(iface->driver) - 1);
-        } else {
-            strcpy(iface->driver, "未知");
-        }
-    } else {
-        strcpy(iface->driver, "未知");
-    }
-}
 
 // 扫描所有网络接口
 int scan_network_interfaces() {
@@ -2129,7 +2025,6 @@ int scan_network_interfaces() {
         get_interface_ip_info(entry->d_name, iface);
         get_interface_speed_info(entry->d_name, iface);
         get_interface_stats(entry->d_name, iface);
-        get_driver_info(entry->d_name, iface);
         
         interface_count++;
     }
@@ -2152,7 +2047,6 @@ void print_interface_info(const network_interface_t *iface) {
     printf("  MTU: %d\n", iface->mtu);
     printf("  接收字节: %llu\n", iface->rx_bytes);
     printf("  发送字节: %llu\n", iface->tx_bytes);
-    printf("  驱动: %s\n", iface->driver);
     printf("  %s\n", "─");
 }
 
@@ -2191,7 +2085,6 @@ void get_specific_interface_info(const char *ifname) {
     get_interface_ip_info(ifname, &iface);
     get_interface_speed_info(ifname, &iface);
     get_interface_stats(ifname, &iface);
-    get_driver_info(ifname, &iface);
     
     printf("=== %s 详细信息 ===\n", ifname);
     print_interface_info(&iface);
@@ -2259,4 +2152,53 @@ int get_system_total_traffic(system_traffic_t *t,
     t->last_time = now;
     
     return 0;
+}
+void get_system_info(system_info_t *info) {
+    // 设备名称（主机名）
+    gethostname(info->devicename, sizeof(info->devicename));
+    
+    // 处理器信息
+    FILE *cpuinfo = fopen("/proc/cpuinfo", "r");
+    if (cpuinfo) {
+        char line[256];
+        while (fgets(line, sizeof(line), cpuinfo)) {
+            if (strstr(line, "model name")) {
+                char *colon = strchr(line, ':');
+                if (colon) {
+                    strcpy(info->cpuname, colon + 2);
+                    info->cpuname[strcspn(info->cpuname, "\n")] = 0;
+                    break;
+                }
+            }
+        }
+        fclose(cpuinfo);
+    }
+    
+    // 操作系统信息
+    FILE *os_release = fopen("/etc/os-release", "r");
+    if (os_release) {
+        char line[256];
+        while (fgets(line, sizeof(line), os_release)) {
+            if (strstr(line, "PRETTY_NAME")) {
+                char *start = strchr(line, '"') + 1;
+                char *end = strrchr(line, '"');
+                if (start && end) {
+                    strncpy(info->operatename, start, end - start);
+                    info->operatename[end - start] = '\0';
+                    break;
+                }
+            }
+        }
+        fclose(os_release);
+    }
+    
+    // 序列号
+    FILE *serial_file = fopen("/sys/class/dmi/id/product_serial", "r");
+    if (serial_file) {
+        fgets(info->serial_number, sizeof(info->serial_number), serial_file);
+        info->serial_number[strcspn(info->serial_number, "\n")] = 0;
+        fclose(serial_file);
+    } else {
+        strcpy(info->serial_number, "Not Available");
+    }
 }
