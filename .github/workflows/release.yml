@@ -48,6 +48,7 @@ jobs:
           chmod +x ${PKG_DIR}/DEBIAN/prerm
 
           dpkg-deb --build ${PKG_DIR}
+          mkdir -p ./artifacts/
           mv ./deb-package/${PKG_NAME}.deb ./artifacts/
 
       - name: Create Release
