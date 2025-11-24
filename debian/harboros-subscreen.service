@@ -1,0 +1,11 @@
+[Unit]
+Description=HarborOS Subscreen Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/panel
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

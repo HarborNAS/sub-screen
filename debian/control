@@ -1,0 +1,8 @@
+Package: harboros-subscreen
+Version: VERSION_PLACEHOLDER
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: Harborinno Ltd.
+Description: HarborOS Subscreen Panel Service
+  This package provides the subscreen panel service for HarborOS.

@@ -1,0 +1,7 @@
+#!/bin/bash
+set -e
+
+systemctl stop harboros-subscreen.service || true
+systemctl disable harboros-subscreen.service || true
+
+exit 0
