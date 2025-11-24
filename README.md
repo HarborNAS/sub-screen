@@ -5,6 +5,7 @@ tested in debian 12 or ubuntu xx
 ```bash
 sudo apt install build-essential
 sudo apt install libhidapi-dev
+sudo apt install libnvidia-ml-dev
 ```
 
 ## Build
@@ -21,9 +22,9 @@ cat directive.txt | bash
 4. Support SystemPage(CPU,IGPU,Memory,NVDGPU) 2025/11/11 testOK
 5. Support DiskPage 2025/11/11 testOK
 
-
 ## TODO
+
 1. WLANPage
-2. PowerPage 
+2. PowerPage
 3. SleepPage
 4. LocalPage

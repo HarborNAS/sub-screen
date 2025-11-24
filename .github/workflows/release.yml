@@ -6,7 +6,7 @@ on:
       tag:
         description: "Tag to release"
         required: true
-        default: "v1.0.0"
+        default: "1.0.0"
 
 jobs:
   build:
@@ -18,6 +18,7 @@ jobs:
         run: |
           sudo apt install build-essential
           sudo apt install libhidapi-dev
+          sudo apt install libnvidia-ml-dev
       - name: build
         run: |
           gcc -fdiagnostics-color=always -g ./panel.c -o ./build/panel -lhidapi-libusb -lhidapi-hidraw
