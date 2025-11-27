@@ -101,9 +101,21 @@ typedef struct __attribute__((__packed__)) {
             unsigned char crc;
         } user_data;
         struct __attribute__((__packed__)) {
+            unsigned char id;       //default = 1
             Wlanspeed speed_info;
             unsigned char crc;
         } speed_data;
+        struct __attribute__((__packed__)) {
+            unsigned char id;       //default = 1
+            unsigned char unit;
+            unsigned short totalflow;
+            unsigned char crc;
+        } flow_data;
+        struct __attribute__((__packed__)) {
+            unsigned char id;       //default = 1
+            unsigned char ip[4];
+            unsigned char crc;
+        } wlanip_data;
         struct __attribute__((__packed__))
         {
             Memory memory_info;
