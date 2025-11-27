@@ -246,8 +246,9 @@ int main(void) {
         printf("未发现物理网络接口\n");
         return 1;
     }
-    
     #if DebugToken
+    print_all_interfaces();
+    
     printf("HID device opened successfully\n");
     #endif
     #endif
@@ -267,6 +268,7 @@ int main(void) {
     unsigned char ack[MAXLEN] = {0};
     cputemp = get_cpu_temperature();
     init_traffic(&traffic);
+    get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
     //get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
     #if DebugToken
     // printf("CPUTemp:%d\n",cputemp);
@@ -359,10 +361,8 @@ int main(void) {
             printf("Failed to write DiskPage data\n");
             break;
         }
-        sleep(3);
-        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         #if DebugToken
-        printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
+        // printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
         // printf("Diskpage Head: %x\n",request->header);
         // printf("sequence %d\n",request->sequence);
         // printf("lenth %d\n",request->length);
@@ -392,6 +392,9 @@ int main(void) {
         // printf("CRC:%d\n",request->DiskPage_data.crc);
         // printf("Send %d time\n",(i+1));
         #endif
+        sleep(3);
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+        
     }
     #if DebugToken
     printf("-----------------------------------DiskPage initial end-----------------------------------\n");
@@ -444,8 +447,6 @@ int main(void) {
     #if DebugToken
     printf("-----------------------------------InfoPage initial end-----------------------------------\n");
     #endif
-
-
     while (running) {
         #if !IfNoPanel
         if(HourTimeDiv % 60 == 0)
@@ -474,6 +475,10 @@ int main(void) {
                     TimeSleep1Sec();
                 }
             }
+
+        }
+        if(HourTimeDiv % 600 == 0)
+        {
             // Time
             int timereportsize = init_hidreport(request, SET, TIME_AIM, 255);
             append_crc(request);
@@ -486,11 +491,22 @@ int main(void) {
             #if DebugToken
             printf("-----------------------------------TimeSendOK-----------------------------------\n");
             #endif
+            //WLAN IP
+            int wlanipsize;
+            for (int i = 0; i < interface_count; i++)
+            {
+            wlanipsize = init_hidreport(request, SET, WlanTotal_AIM,i);
+            append_crc(request);
+            if (safe_hid_write(handle, hid_report, wlanipsize) == -1) {
+                printf("Failed to write WLANip data\n");
+            break;
+            }
+            memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+            TimeSleep1Sec();
         }
-        if(HourTimeDiv % 3600 == 0)
-        {
-            HourTimeDiv = 0;
-
+        #if DebugToken
+        printf("-----------------------------------WLANIPSendOK-----------------------------------\n");
+        #endif
         }
         #endif
         #if !IfNoPanel
@@ -522,7 +538,7 @@ int main(void) {
         TimeSleep1Sec();
         //*****************************************************/
         // Memory Usage
-        int memusagesize = init_hidreport(request, SET, System_AIM,3);
+        int memusagesize = init_hidreport(request, SET, System_AIM,2);
         append_crc(request);
         if (safe_hid_write(handle, hid_report, memusagesize) == -1) {
             printf("Failed to write MEMORY data\n");
@@ -533,6 +549,23 @@ int main(void) {
         #endif
         memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         TimeSleep1Sec();
+
+        if(IsNvidiaGPU)
+        {
+            int dgpusize = init_hidreport(request, SET, System_AIM,3);
+            append_crc(request);
+            if (safe_hid_write(handle, hid_report, dgpusize) == -1) {
+                printf("Failed to write GPU data\n");
+            break;
+            }
+            #if DebugToken
+            printf("-----------------------------------GPUSendOK-----------------------------------\n");
+            #endif
+            memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+            TimeSleep1Sec();
+        }
+        
+
         //*****************************************************/
         // User Online
         int usersize = init_hidreport(request, SET, USER_AIM,255);
@@ -546,20 +579,36 @@ int main(void) {
         #endif
         memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         TimeSleep1Sec();
-        if(IsNvidiaGPU)
-        {
-            int dgpusize = init_hidreport(request, SET, System_AIM,4);
-            append_crc(request);
-            if (safe_hid_write(handle, hid_report, dgpusize) == -1) {
-                printf("Failed to write GPU data\n");
-            break;
-            }
-            #if DebugToken
-            printf("-----------------------------------GPUSendOK-----------------------------------\n");
-            #endif
-            memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+        
+        
+        int wlanspeedsize = init_hidreport(request, SET, WlanSpeed_AIM,255);
+        append_crc(request);
+        if (safe_hid_write(handle, hid_report, wlanspeedsize) == -1) {
+            printf("Failed to write WLANSpeed data\n");
+        break;
         }
+        #if DebugToken
+        printf("-----------------------------------WLANSpeedSendOK-----------------------------------\n");
+        #endif
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
         TimeSleep1Sec();
+
+        int totalflowsize = init_hidreport(request, SET, WlanTotal_AIM,255);
+        append_crc(request);
+        if (safe_hid_write(handle, hid_report, totalflowsize) == -1) {
+            printf("Failed to write Totalflow data\n");
+        break;
+        }
+        #if DebugToken
+        printf("-----------------------------------TotalflowSendOK-----------------------------------\n");
+        #endif
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+        TimeSleep1Sec();
+
+
+
+
+
         //*****************************************************/
         //Get Error
         // int result = hid_read_timeout(handle, ack, 0x40, -1);
@@ -619,6 +668,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         request->system_data.system_info.sys_id = id;
         if(id == 0)
         {
+            request->system_data.system_info.temerature = get_cpu_temperature();
             // 读取当前CPU数据
             read_cpu_data(&curr_data);
             // 计算CPU使用率
@@ -718,12 +768,54 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         request->user_data.user_info.online = GetUserCount();
         return offsetof(Request, user_data.crc) + 1;
     case WlanSpeed_AIM:
+        request->length += sizeof(request->speed_data);
+        request->speed_data.id = 1;
         get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
-        request->length+= sizeof(request->speed_data);
-        request->speed_data.speed_info.unit = 3;//Mb
+        //unit default use KB/S
+        if(tx_speed > 1024)
+        {
+            request->speed_data.speed_info.unit += 1;//Upto MB/S
+            tx_speed /= 1024;
+        }
+        if(tx_speed > 1024)
+        {
+            request->speed_data.speed_info.unit += 1;//Upto GB/S
+            tx_speed /= 1024;
+        }
+        if(rx_speed > 1024)
+        {
+            request->speed_data.speed_info.unit += 4;//Upto GB
+            rx_speed /= 1024;
+        }
+        if(rx_speed > 1024)
+        {
+            request->speed_data.speed_info.unit += 4;//Upto GB
+            rx_speed /= 1024;
+        }
         request->speed_data.speed_info.uploadspeed = tx_speed;
         request->speed_data.speed_info.downloadspeed = rx_speed;
         return offsetof(Request, speed_data.crc) + 1;
+    case WlanTotal_AIM:
+        request->length += sizeof(request->flow_data);
+        request->flow_data.id = 1;
+        
+        request->flow_data.totalflow = (traffic.total_rx / 1024)  + (traffic.total_tx / 1024);
+        if(request->flow_data.totalflow > 1024)
+        {
+            request->flow_data.unit = 2;
+            request->flow_data.totalflow /= 1024;
+        }
+        else
+            request->flow_data.unit = 1;
+        return offsetof(Request, flow_data.crc) + 1;
+    case WlanIP_AIM:
+        request->length += sizeof(request->wlanip_data);
+        request->wlanip_data.id = id;
+        request->wlanip_data.ip[0] = wlaninterfaces[id].ip_address[0];
+        request->wlanip_data.ip[1] = wlaninterfaces[id].ip_address[1];
+        request->wlanip_data.ip[2] = wlaninterfaces[id].ip_address[2];
+        request->wlanip_data.ip[3] = wlaninterfaces[id].ip_address[3];
+        return offsetof(Request, wlanip_data.crc) + 1;
     default:
         request->length += sizeof(request->common_data);
         return offsetof(Request, common_data.crc) + 1;
@@ -871,16 +963,41 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         request->WlanPage_data.wlanPage.id = order;
         request->WlanPage_data.wlanPage.unit = 3;
         get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
-        request->WlanPage_data.wlanPage.uploadspeed = tx_speed;
-        request->WlanPage_data.wlanPage.downloadspeed = rx_speed;
+        if(wlaninterfaces[order - 1].operstate[1] == 'p')//Up
+        {
+            request->WlanPage_data.wlanPage.uploadspeed = tx_speed;
+            request->WlanPage_data.wlanPage.downloadspeed = rx_speed;
+        }
+        else
+        {
+            request->WlanPage_data.wlanPage.uploadspeed = 0;
+            request->WlanPage_data.wlanPage.downloadspeed = 0;
+        }
+        if (strcmp(wlaninterfaces[order - 1].ip_address, "未分配") != 0 && 
+        strcmp(wlaninterfaces[order - 1].ip_address, "0.0.0.0") != 0) {
+        
+        unsigned int a, b, c, d;
+        if (sscanf(wlaninterfaces[order - 1].ip_address, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+            printf("IP字节分解: %d.%d.%d.%d\n", a, b, c, d);
+            printf("IP十六进制: 0x%02X.0x%02X.0x%02X.0x%02X\n", a, b, c, d);
+            request->WlanPage_data.wlanPage.ip[0] = a;
+            request->WlanPage_data.wlanPage.ip[1] = b;
+            request->WlanPage_data.wlanPage.ip[2] = c;
+            request->WlanPage_data.wlanPage.ip[3] = d;
+            }
+        }
+        else
+        {
+            request->WlanPage_data.wlanPage.ip[0] = 0;
+            request->WlanPage_data.wlanPage.ip[1] = 0;
+            request->WlanPage_data.wlanPage.ip[2] = 0;
+            request->WlanPage_data.wlanPage.ip[3] = 0;
+        }
         //request->WlanPage_data.wlanPage.totalflow = traffic.total_rx / 1024 / 1024 + traffic.total_tx / 1024 /1024;
-        request->WlanPage_data.wlanPage.ip[0] = wlaninterfaces[order].ip_address[0];
-        request->WlanPage_data.wlanPage.ip[1] = wlaninterfaces[order].ip_address[1];
-        request->WlanPage_data.wlanPage.ip[2] = wlaninterfaces[order].ip_address[2];
-        request->WlanPage_data.wlanPage.ip[3] = wlaninterfaces[order].ip_address[3];
+
         for (int i = 0; i < sizeof(wlaninterfaces[order].name); i++)
         {
-            request->WlanPage_data.wlanPage.name[i] = wlaninterfaces[order].name[i];
+            request->WlanPage_data.wlanPage.name[i] = wlaninterfaces[order - 1].name[i];
         }
         return offsetof(Request, WlanPage_data.crc) + 1;
     case InfoPage_AIM:
@@ -941,6 +1058,10 @@ void append_crc(Request *request) {
             len = offsetof(Request, disk_data.crc);
             request->disk_data.crc = cal_crc((unsigned char *)request, len);
             return;
+        case ModePage_AIM:
+            len = offsetof(Request, ModePage_data.crc);
+            request->ModePage_data.crc = cal_crc((unsigned char *)request, len);
+            return;
         case WlanPage_AIM:
             len = offsetof(Request, WlanPage_data.crc);
             request->WlanPage_data.crc = cal_crc((unsigned char *)request, len);
@@ -957,6 +1078,14 @@ void append_crc(Request *request) {
             len = offsetof(Request, speed_data.crc);
             request->user_data.crc = cal_crc((unsigned char *)request, len);
             return;
+        case WlanTotal_AIM:
+            len = offsetof(Request, flow_data.crc);
+            request->flow_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case WlanIP_AIM:
+            len = offsetof(Request, wlanip_data.crc);
+            request->wlanip_data.crc = cal_crc((unsigned char *)request, len);
+            return;
         default:
             len = offsetof(Request, common_data.crc);
             request->common_data.crc = cal_crc((unsigned char *)request, len);
@@ -972,7 +1101,11 @@ unsigned char cal_crc(unsigned char * data, int len) {
     for (; off < len; off++) {
         crc += *((unsigned char *)(data) + off);
         #if hidwritedebug
-        printf("%d ",*((unsigned char *)(data) + off));
+        if(off == 5)
+        {
+            printf("AIM:");
+        }
+        printf("0x%02X ",*((unsigned char *)(data) + off));
         #endif
     }
     #if hidwritedebug
@@ -1202,19 +1335,29 @@ int get_disk_temperature(const char *device) {
     
     // 方法1: 尝试smartctl
     char cmd[MAX_PATH];
+    // 使用 -C 选项强制转换为摄氏度
     snprintf(cmd, sizeof(cmd), 
-             "sudo smartctl -A /dev/%s 2>/dev/null | grep -i 'Temperature' | head -1", device);
-    
+            "sudo smartctl -C -A /dev/%s 2>/dev/null | grep -i 'Temperature' | head -1", device);
+
     FILE *fp = popen(cmd, "r");
     if (fp) {
         char output[256];
         if (fgets(output, sizeof(output), fp)) {
-            // 在输出中查找温度数字
+            // 改进的数字提取逻辑
             char *ptr = output;
             while (*ptr) {
+                // 查找连续的数字（支持2-3位数）
                 if (*ptr >= '0' && *ptr <= '9') {
-                    int temp = atoi(ptr);
-                    if (temp > 0 && temp < 100) {
+                    char *num_start = ptr;
+                    while (*ptr >= '0' && *ptr <= '9') ptr++;
+                    char saved_char = *ptr;
+                    *ptr = '\0'; // 临时终止字符串
+                    
+                    int temp = atoi(num_start);
+                    *ptr = saved_char; // 恢复原字符
+                    
+                    // 放宽温度范围，但仍保持合理限制
+                    if (temp >= 10 && temp <= 80) {
                         pclose(fp);
                         return temp;
                     }
@@ -1779,9 +1922,6 @@ void* hid_read_thread(void *arg) {
 // 线程安全的写入函数
 int safe_hid_write(hid_device *handle, const unsigned char *data, int length) {
     pthread_mutex_lock(&hid_mutex);
-    #if DebugToken
-    printf("Safe hid write\n");
-    #endif
     int result = hid_write(handle, data, length);
     pthread_mutex_unlock(&hid_mutex);
     return result;
@@ -1893,10 +2033,10 @@ void get_interface_ip_info(const char *ifname, network_interface_t *iface) {
         if (ip_str && strcmp(ip_str, "0.0.0.0") != 0) {
             strncpy(iface->ip_address, ip_str, sizeof(iface->ip_address) - 1);
         } else {
-            strcpy(iface->ip_address, "未分配");
+            strcpy(iface->ip_address, "0.0.0.0");
         }
     } else {
-        strcpy(iface->ip_address, "未分配");
+        strcpy(iface->ip_address, "0.0.0.0");
     }
     
     // 获取子网掩码
@@ -2132,15 +2272,15 @@ int get_system_total_traffic(system_traffic_t *t,
     fclose(fp);
     
     time_t now = time(NULL);
-    t->total_rx = current_rx;
-    t->total_tx = current_tx;
+    t->total_rx = (current_rx / 1024);//KB
+    t->total_tx = (current_tx / 1024);//KB
     
     // 计算速度
     if (!t->first_call) {
         double secs = difftime(now, t->last_time);
         if (secs > 0) {
-            *rx_speed = (double)(current_rx - t->last_rx) / (1024 * 1024 * secs);
-            *tx_speed = (double)(current_tx - t->last_tx) / (1024 * 1024 * secs);
+            *rx_speed = (double)(current_rx - t->last_rx) / (1024 * secs);//KB
+            *tx_speed = (double)(current_tx - t->last_tx) / (1024 * secs);//KB
         }
     } else {
         *rx_speed = *tx_speed = 0;
