@@ -811,10 +811,25 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
     case WlanIP_AIM:
         request->length += sizeof(request->wlanip_data);
         request->wlanip_data.id = id;
-        request->wlanip_data.ip[0] = wlaninterfaces[id].ip_address[0];
-        request->wlanip_data.ip[1] = wlaninterfaces[id].ip_address[1];
-        request->wlanip_data.ip[2] = wlaninterfaces[id].ip_address[2];
-        request->wlanip_data.ip[3] = wlaninterfaces[id].ip_address[3];
+        if (strcmp(wlaninterfaces[id - 1].ip_address, "未分配") != 0 && 
+        strcmp(wlaninterfaces[id - 1].ip_address, "0.0.0.0") != 0) {
+        unsigned int a, b, c, d;
+        if (sscanf(wlaninterfaces[id - 1].ip_address, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+            printf("IP字节分解: %d.%d.%d.%d\n", a, b, c, d);
+            printf("IP十六进制: 0x%02X.0x%02X.0x%02X.0x%02X\n", a, b, c, d);
+            request->wlanip_data.ip[0] = a;
+            request->wlanip_data.ip[1] = b;
+            request->wlanip_data.ip[2] = c;
+            request->wlanip_data.ip[3] = d;
+            }
+        }
+        else
+        {
+            request->wlanip_data.ip[0] = 0;
+            request->wlanip_data.ip[1] = 0;
+            request->wlanip_data.ip[2] = 0;
+            request->wlanip_data.ip[3] = 0;
+        }
         return offsetof(Request, wlanip_data.crc) + 1;
     default:
         request->length += sizeof(request->common_data);
@@ -975,7 +990,6 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         }
         if (strcmp(wlaninterfaces[order - 1].ip_address, "未分配") != 0 && 
         strcmp(wlaninterfaces[order - 1].ip_address, "0.0.0.0") != 0) {
-        
         unsigned int a, b, c, d;
         if (sscanf(wlaninterfaces[order - 1].ip_address, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
             printf("IP字节分解: %d.%d.%d.%d\n", a, b, c, d);
