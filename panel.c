@@ -1882,11 +1882,11 @@ void* hid_read_thread(void *arg) {
         
         if (res > 0) {
             #if DebugToken
-            // printf("HID Received %d bytes: ", res);
-            // for (int i = 0; i < res; i++) {
-            //     printf("%02x ", read_buf[i]);
-            // }
-            // printf("\n");
+            printf("HID Received %d bytes: ", res);
+            for (int i = 0; i < res; i++) {
+                printf("%02x ", read_buf[i]);
+            }
+            printf("\n");
             #endif
             // 检测心跳包
             if (res >= 7 && 
@@ -1900,16 +1900,6 @@ void* hid_read_thread(void *arg) {
             // 检测其他命令...
             else if (res >= 6 && 
                      read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
-                     read_buf[2] == 0x00 && read_buf[3] == 0x06 &&
-                     read_buf[4] == 0x02 && read_buf[5] == 0x81 &&
-                     read_buf[6] == 0x3C && read_buf[7] == 0x00 &&
-                    read_buf[8] == 0xC4) {
-                printf(">>> Hibernate 60S command received!\n");
-                systemoperation(HIBERNATEATONCE_AIM,60);
-                //system("shutdown -h now");
-            }
-            else if (res >= 6 && 
-                     read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
                      read_buf[2] == 0xff && read_buf[3] == 0x04 &&
                      read_buf[4] == 0x03 && read_buf[5] == 0x82 &&
                      read_buf[6] == 0x87) {
@@ -1917,8 +1907,42 @@ void* hid_read_thread(void *arg) {
                 systemoperation(HIBERNATEATONCE_AIM,0);
                 //system("shutdown -h now");
             }
-            else {
-                //printf(">>> Other command/data\n");
+            else if (res >= 6 && 
+                     read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
+                     read_buf[2] == 0xff && read_buf[3] == 0x04 &&
+                     read_buf[4] == 0x03) {
+                    switch (read_buf[5])
+                    {
+                    case HomePage_AIM:
+                        PageIndex = HomePage_AIM;
+                        break;
+                    case SystemPage_AIM:
+                        PageIndex = SystemPage_AIM;
+                        break;
+                    case DiskPage_AIM:
+                        PageIndex = DiskPage_AIM;
+                        break;
+                    case WlanPage_AIM:
+                        PageIndex = WlanPage_AIM;
+                        break;
+                    case Mute_AIM:
+                        PageIndex = Mute_AIM;
+                        break;
+                    case Properties_AIM:
+                        PageIndex = Properties_AIM;
+                        break;
+                    case Balance_AIM:
+                        PageIndex = Properties_AIM;
+                        break;
+                    default:
+                        PageIndex = HomePage_AIM;
+                        break;
+                    }
+                    printf(">>> PageChange command received!0x%02X\n",PageIndex);
+            }
+            else
+            {
+
             }
             
             memset(read_buf, 0, sizeof(read_buf));
