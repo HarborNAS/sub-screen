@@ -1076,7 +1076,7 @@ void append_crc(Request *request) {
             return;
         case WlanSpeed_AIM:
             len = offsetof(Request, speed_data.crc);
-            request->user_data.crc = cal_crc((unsigned char *)request, len);
+            request->speed_data.crc = cal_crc((unsigned char *)request, len);
             return;
         case WlanTotal_AIM:
             len = offsetof(Request, flow_data.crc);
