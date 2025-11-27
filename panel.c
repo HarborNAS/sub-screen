@@ -834,8 +834,10 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         strcmp(wlaninterfaces[order - 1].ip_address, "0.0.0.0") != 0) {
         unsigned int a, b, c, d;
         if (sscanf(wlaninterfaces[order - 1].ip_address, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+            #if DebugToken
             printf("IP字节分解: %d.%d.%d.%d\n", a, b, c, d);
             printf("IP十六进制: 0x%02X.0x%02X.0x%02X.0x%02X\n", a, b, c, d);
+            #endif
             request->WlanPage_data.wlanPage.ip[0] = a;
             request->WlanPage_data.wlanPage.ip[1] = b;
             request->WlanPage_data.wlanPage.ip[2] = c;
@@ -1774,13 +1776,15 @@ void* hid_read_thread(void *arg) {
                         PageIndex = Properties_AIM;
                         break;
                     case Balance_AIM:
-                        PageIndex = Properties_AIM;
+                        PageIndex = Balance_AIM;
                         break;
                     default:
                         PageIndex = HomePage_AIM;
                         break;
                     }
+                    #if DebugToken
                     printf(">>> PageChange command received!0x%02X\n",PageIndex);
+                    #endif
             }
             else
             {

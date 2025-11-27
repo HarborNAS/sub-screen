@@ -21,7 +21,7 @@ typedef struct __attribute__((__packed__)) {
     unsigned char sys_id;
     unsigned char usage;
     unsigned char temerature;
-    unsigned short rpm;
+    unsigned char rpm;
 } SystemD;
 
 typedef struct __attribute__((__packed__)) {
@@ -33,18 +33,12 @@ typedef struct __attribute__((__packed__)) {
     unsigned int usage;
 } Memory;
 
-typedef struct {
-    unsigned char sys_id;    //>= 1
-    unsigned char usage;        //Default -1
-    unsigned int temerature;    //Default -1
-    unsigned short rpm;           //Default -1
-} systemStruct;
 typedef struct __attribute__((__packed__)) {
     unsigned char syslength;
     unsigned char sys_id;
     unsigned char usage;
     unsigned char temp;
-    unsigned short rpm;
+    unsigned char rpm;
     unsigned char name[8];
 } SystemPage;
 typedef struct {
