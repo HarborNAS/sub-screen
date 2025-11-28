@@ -455,12 +455,34 @@ int main(void) {
     #if DebugToken
     printf("-----------------------------------InfoPage initial start-----------------------------------\n");
     #endif
-    int infopage = first_init_hidreport(request, SET, InfoPage_AIM, 1, 1);
+    int infopage;
+    infopage = first_init_hidreport(request, SET, InfoPage_AIM, 4, 1);
     append_crc(request);
     if (safe_hid_write(handle, hid_report, infopage) == -1) {
         printf("Failed to write InfoPage data\n");
     }
-    sleep(3);
+    sleep(1);
+    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    infopage = first_init_hidreport(request, SET, InfoPage_AIM, 4, 2);
+    append_crc(request);
+    if (safe_hid_write(handle, hid_report, infopage) == -1) {
+        printf("Failed to write InfoPage data\n");
+    }
+    sleep(1);
+    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    infopage = first_init_hidreport(request, SET, InfoPage_AIM, 4, 3);
+    append_crc(request);
+    if (safe_hid_write(handle, hid_report, infopage) == -1) {
+        printf("Failed to write InfoPage data\n");
+    }
+    sleep(1);
+    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    infopage = first_init_hidreport(request, SET, InfoPage_AIM, 4, 4);
+    append_crc(request);
+    if (safe_hid_write(handle, hid_report, infopage) == -1) {
+        printf("Failed to write InfoPage data\n");
+    }
+    sleep(1);
     memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
     #if DebugToken
     printf("-----------------------------------InfoPage initial end-----------------------------------\n");
@@ -905,28 +927,36 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         request->length += sizeof(request->InfoPage_data);
         request->InfoPage_data.order = order;
         request->InfoPage_data.total = total;
-        request->InfoPage_data.nouse = 0;
-        request->InfoPage_data.count = 0;
-        int i = 0;
-        request->InfoPage_data.devnamelength = sizeof(request->InfoPage_data.devname);
-        for (i = 0; i < sizeof(request->InfoPage_data.devname); i++)
+        request->InfoPage_data.reserve = 0;
+        request->InfoPage_data.namelength = sizeof(request->InfoPage_data.name);
+        switch (order)
         {
-            request->InfoPage_data.devname[i] = sys_info.devicename[i];
-        }
-        request->InfoPage_data.cpunamelength = sizeof(request->InfoPage_data.cpuname);
-        for (i = 0; i < sizeof(request->InfoPage_data.cpuname); i++)
-        {
-            request->InfoPage_data.cpuname[i] = sys_info.cpuname[i];
-        }
-        request->InfoPage_data.operatelength = sizeof(request->InfoPage_data.operate);
-        for (i = 0; i < sizeof(request->InfoPage_data.operate); i++)
-        {
-            request->InfoPage_data.operate[i] = sys_info.operatename[i];
-        }
-        request->InfoPage_data.snlength = sizeof(request->InfoPage_data.sn);
-        for (i = 0; i < sizeof(request->InfoPage_data.sn); i++)
-        {
-            request->InfoPage_data.sn[i] = sys_info.serial_number[i];
+        case 1:
+            for (int i = 0; i < sizeof(request->InfoPage_data.name); i++)
+            {
+                request->InfoPage_data.name[i] = sys_info.devicename[i];
+            }
+            break;
+        case 2:
+            for (int i = 0; i < sizeof(request->InfoPage_data.name); i++)
+            {
+                request->InfoPage_data.name[i] = sys_info.cpuname[i];
+            }
+            break;
+        case 3:
+            for (int i = 0; i < sizeof(request->InfoPage_data.name); i++)
+            {
+                request->InfoPage_data.name[i] = sys_info.operatename[i];
+            }
+            break;
+        case 4:
+            for (int i = 0; i < sizeof(request->InfoPage_data.name); i++)
+            {
+                request->InfoPage_data.name[i] = sys_info.serial_number[i];
+            }
+            break;
+        default:
+            break;
         }
         return offsetof(Request, InfoPage_data.crc) + 1;
     default:
