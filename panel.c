@@ -281,12 +281,6 @@ int main(void) {
         hid_exit();
         return -1;
     }
-    if (pthread_create(&send_thread, NULL, hid_send_thread, handle) != 0) {
-        printf("Failed to create send thread\n");
-        hid_close(handle);
-        hid_exit();
-        return -1;
-    }
     #endif
 
     //get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
@@ -472,7 +466,15 @@ int main(void) {
     printf("-----------------------------------InfoPage initial end-----------------------------------\n");
     #endif
 
-
+    // 创建读取线程
+    #if !IfNoPanel
+    if (pthread_create(&send_thread, NULL, hid_send_thread, handle) != 0) {
+        printf("Failed to create send thread\n");
+        hid_close(handle);
+        hid_exit();
+        return -1;
+    }
+    #endif
     Isinitial = true;
 
     while (running) {
