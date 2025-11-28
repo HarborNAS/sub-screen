@@ -672,8 +672,10 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         strcmp(wlaninterfaces[id - 1].ip_address, "0.0.0.0") != 0) {
         unsigned int a, b, c, d;
         if (sscanf(wlaninterfaces[id - 1].ip_address, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+            #if DebugToken
             printf("IP字节分解: %d.%d.%d.%d\n", a, b, c, d);
             printf("IP十六进制: 0x%02X.0x%02X.0x%02X.0x%02X\n", a, b, c, d);
+            #endif
             request->wlanip_data.ip[0] = a;
             request->wlanip_data.ip[1] = b;
             request->wlanip_data.ip[2] = c;
@@ -1859,14 +1861,19 @@ void* hid_read_thread(void *arg) {
                     case WlanPage_AIM:
                         PageIndex = WlanPage_AIM;
                         break;
-                    case Mute_AIM:
-                        PageIndex = Mute_AIM;
-                        break;
                     case Properties_AIM:
-                        PageIndex = Properties_AIM;
+                        PageIndex = HomePage_AIM;
+                        acquire_io_permissions();
+                        ec_ram_write_byte(0x98,0x05);//Performance
+                        // 释放 I/O 权限
+                        release_io_permissions();
                         break;
                     case Balance_AIM:
-                        PageIndex = Balance_AIM;
+                        PageIndex = HomePage_AIM;
+                        acquire_io_permissions();
+                        ec_ram_write_byte(0x98,0x03);//Balance
+                        // 释放 I/O 权限
+                        release_io_permissions();
                         break;
                     case InfoPage_AIM:
                         PageIndex = InfoPage_AIM;
