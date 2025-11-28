@@ -167,6 +167,8 @@ int safe_hid_write(hid_device *handle, const unsigned char *data, int length);
 void systemoperation(unsigned char time,unsigned char cmd);
 int is_physical_interface(const char *ifname);
 void get_interface_basic_info(const char *ifname, network_interface_t *iface);
+int is_valid_mac_address(const char *mac);
+char* get_interface_mac(const char *ifname);
 void get_interface_ip_info(const char *ifname, network_interface_t *iface);
 void get_interface_speed_info(const char *ifname, network_interface_t *iface);
 void get_interface_stats(const char *ifname, network_interface_t *iface);
@@ -2064,10 +2066,75 @@ int is_physical_interface(const char *ifname) {
         strncmp(ifname, "veth", 4) == 0) {    // 虚拟以太网
         return 0;
     }
+    // 获取MAC地址
+    char *mac = get_interface_mac(ifname);
+    if (!mac || !is_valid_mac_address(mac)) {
+        return 0;
+    }
     
+    // 额外的检查：查看设备路径
+    char device_path[256];
+    snprintf(device_path, sizeof(device_path), "/sys/class/net/%s/device", ifname);
+    
+    // 如果device目录不存在，可能是纯虚拟接口
+    if (access(device_path, F_OK) != 0) {
+        return 0;
+    }
     return 1;
 }
-
+// 获取接口的MAC地址
+char* get_interface_mac(const char *ifname) {
+    static char mac[18];
+    char path[256];
+    FILE *file;
+    
+    snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname);
+    
+    file = fopen(path, "r");
+    if (!file) {
+        return NULL;
+    }
+    
+    if (fgets(mac, sizeof(mac), file)) {
+        // 去除换行符
+        mac[strcspn(mac, "\n")] = '\0';
+        fclose(file);
+        return mac;
+    }
+    
+    fclose(file);
+    return NULL;
+}
+// 判断MAC地址是否有效
+int is_valid_mac_address(const char *mac) {
+    if (!mac || strlen(mac) == 0 || strcmp(mac, "00:00:00:00:00:00") == 0) {
+        return 0;
+    }
+    
+    // 检查MAC地址格式
+    int colon_count = 0, dash_count = 0;
+    int hex_count = 0;
+    
+    for (int i = 0; mac[i] != '\0'; i++) {
+        if (mac[i] == ':') {
+            colon_count++;
+        } else if (mac[i] == '-') {
+            dash_count++;
+        } else if (isxdigit(mac[i])) {
+            hex_count++;
+        } else if (mac[i] != ' ' && mac[i] != '\t') {
+            // 非法字符
+            return 0;
+        }
+    }
+    
+    // 标准MAC地址应该有 6组十六进制数，5个分隔符
+    if ((colon_count == 5 || dash_count == 5) && hex_count == 12) {
+        return 1;
+    }
+    
+    return 0;
+}
 // 获取接口基本状态信息
 void get_interface_basic_info(const char *ifname, network_interface_t *iface) {
     char path[256];
