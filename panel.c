@@ -1963,8 +1963,13 @@ void* hid_send_thread(void* arg) {
                 }
                 break;
             case DiskPage_AIM:
+                int disk_maxtemp = 0;
                 for (int i = 0; i < disk_count; i++) {
                     if (disks[i].temperature != -1) {
+                        if(disk_maxtemp < disks[i].temperature)
+                        {
+                            disk_maxtemp = disks[i].temperature;
+                        }
                         int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
 
                         append_crc(request);
@@ -1992,6 +1997,11 @@ void* hid_send_thread(void* arg) {
                         #endif
                     }
                 }
+                // 获取 I/O 权限
+                acquire_io_permissions();
+                ec_ram_write_byte(0xB1,disk_maxtemp);
+                // 释放 I/O 权限
+                release_io_permissions();
                 break;
             case WlanPage_AIM:
                 //*****************************************************/
