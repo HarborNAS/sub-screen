@@ -451,6 +451,10 @@ int main(void) {
     #endif
 
     get_system_info(&sys_info);
+    printf("Device Name:%s\n",sys_info.devicename);
+    printf("CPU Name:%s\n",sys_info.cpuname);
+    printf("OS Name:%s\n",sys_info.operatename);
+    printf("SN:%s\n",sys_info.serial_number);
     #if DebugToken
     printf("-----------------------------------InfoPage initial start-----------------------------------\n");
     #endif
@@ -520,21 +524,22 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
             prev_data = curr_data;
             // 获取 I/O 权限
             acquire_io_permissions();
-            unsigned char CPU_fan = 0;
-            ec_ram_read_byte(0x70,&CPU_fan);
-            request->system_data.system_info.rpm = CPU_fan;
+            unsigned char CPU_fan_H = 0,CPU_fan_L = 0;
+            ec_ram_read_byte(0x76,&CPU_fan_H);
+            ec_ram_read_byte(0x77,&CPU_fan_L);
+            request->system_data.system_info.rpm = (CPU_fan_H * 0xFF + CPU_fan_L) / 4200;
             // 释放 I/O 权限
             release_io_permissions();
-            
         }
         else if(id == 1)
         {
             request->system_data.system_info.usage = get_igpu_usage();
             request->system_data.system_info.temerature = get_igpu_temperature();
             acquire_io_permissions();
-            unsigned char CPU_fan = 0;
-            ec_ram_read_byte(0x70,&CPU_fan);
-            request->system_data.system_info.rpm = CPU_fan;
+            unsigned char CPU_fan_H = 0,CPU_fan_L = 0;
+            ec_ram_read_byte(0x76,&CPU_fan_H);
+            ec_ram_read_byte(0x77,&CPU_fan_L);
+            request->system_data.system_info.rpm = (CPU_fan_H * 0xFF + CPU_fan_L) / 4200;
             // 释放 I/O 权限
             release_io_permissions();
         }
@@ -1778,6 +1783,9 @@ void* hid_read_thread(void *arg) {
                     case Balance_AIM:
                         PageIndex = Balance_AIM;
                         break;
+                    case InfoPage_AIM:
+                        PageIndex = InfoPage_AIM;
+                        break;
                     default:
                         PageIndex = HomePage_AIM;
                         break;
@@ -1808,7 +1816,7 @@ void* hid_send_thread(void* arg) {
     
     while (running) {
         // 发送HID数据
-                if(HourTimeDiv % 60 == 0)
+        if(HourTimeDiv % 60 == 0)
         {
             //1 Min Do
             for (int i = 0; i < disk_count; i++) {
@@ -2019,7 +2027,7 @@ int safe_hid_write(hid_device *handle, const unsigned char *data, int length) {
     return result;
 }
 
-void systemoperation(unsigned char time,unsigned char cmd)
+void systemoperation(unsigned char cmd,unsigned char time)
 {
     char *command = NULL;
     for (unsigned char i = 0; i < time; i++)
