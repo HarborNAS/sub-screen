@@ -573,7 +573,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
     case Disk_AIM:
         request->length += sizeof(request->disk_data);
         request->disk_data.disk_info.disk_id = id;
-        request->disk_data.disk_info.unit = 3;
+        request->disk_data.disk_info.unit = 0x33;
         request->disk_data.disk_info.total_size = disks[id].total_size;
         request->disk_data.disk_info.used_size = disks[id].used_size;
         request->disk_data.disk_info.temp = disks[id].temperature;
@@ -621,28 +621,29 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         request->speed_data.id = 1;
         get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
         //unit default use KB/S
-        if(tx_speed > 1024)
-        {
-            request->speed_data.speed_info.unit += 1;//Upto MB/S
-            tx_speed /= 1024;
-        }
-        if(tx_speed > 1024)
-        {
-            request->speed_data.speed_info.unit += 1;//Upto GB/S
-            tx_speed /= 1024;
-        }
-        if(rx_speed > 1024)
-        {
-            request->speed_data.speed_info.unit += 4;//Upto GB
-            rx_speed /= 1024;
-        }
-        if(rx_speed > 1024)
-        {
-            request->speed_data.speed_info.unit += 4;//Upto GB
-            rx_speed /= 1024;
-        }
+        request->speed_data.speed_info.unit = 0x11;
         request->speed_data.speed_info.uploadspeed = tx_speed;
         request->speed_data.speed_info.downloadspeed = rx_speed;
+        if(request->speed_data.speed_info.uploadspeed > 1024)
+        {
+            request->speed_data.speed_info.unit += 0x10;
+            request->speed_data.speed_info.uploadspeed /= 1024;
+            if(request->speed_data.speed_info.uploadspeed > 1024)
+            {
+                request->speed_data.speed_info.unit += 0x10;
+                request->speed_data.speed_info.uploadspeed /= 1024;
+            }
+        }
+        if(request->speed_data.speed_info.downloadspeed > 1024)
+        {
+            request->speed_data.speed_info.unit += 0x01;
+            request->speed_data.speed_info.downloadspeed /= 1024;
+            if(request->speed_data.speed_info.downloadspeed > 1024)
+            {
+                request->speed_data.speed_info.unit += 0x01;
+                request->speed_data.speed_info.downloadspeed /= 1024;
+            }
+        }
         return offsetof(Request, speed_data.crc) + 1;
     case WlanTotal_AIM:
         request->length += sizeof(request->flow_data);
@@ -769,7 +770,8 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         {
             request->DiskPage_data.count = 1;
             request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
-            request->DiskPage_data.diskStruct[0].unit = 3;
+            request->DiskPage_data.diskStruct[0].unit = 0x33;
+            request->DiskPage_data.diskStruct[0].reserve = 0;
             request->DiskPage_data.diskStruct[0].total_size = disks[(order - 1) * 2].total_size;
             request->DiskPage_data.diskStruct[0].used_size = disks[(order - 1) * 2].used_size;
             request->DiskPage_data.diskStruct[0].temp = disks[(order - 1) * 2].temperature;
@@ -786,7 +788,8 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             //First
             request->DiskPage_data.count = 2;
             request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2;//id >= 0
-            request->DiskPage_data.diskStruct[0].unit = 3;
+            request->DiskPage_data.diskStruct[0].unit = 0x33;
+            request->DiskPage_data.diskStruct[0].reserve = 0;
             request->DiskPage_data.diskStruct[0].total_size = disks[(order - 1) * 2].total_size;
             request->DiskPage_data.diskStruct[0].used_size = disks[(order - 1) * 2].used_size;
             request->DiskPage_data.diskStruct[0].temp = disks[(order - 1) * 2].temperature;
@@ -798,7 +801,8 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
             //Second
             request->DiskPage_data.diskStruct[1].disk_id = 1 + (order - 1) * 2;
-            request->DiskPage_data.diskStruct[1].unit = 3;
+            request->DiskPage_data.diskStruct[1].unit = 0x33;
+            request->DiskPage_data.diskStruct[1].reserve = 0;
             request->DiskPage_data.diskStruct[1].total_size = disks[(order - 1) * 2 +1].total_size;
             request->DiskPage_data.diskStruct[1].used_size = disks[(order - 1) * 2 + 1].used_size;
             request->DiskPage_data.diskStruct[1].temp = disks[(order - 1) * 2 + 1].temperature;
@@ -813,8 +817,7 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
     case ModePage_AIM:
         request->length += sizeof(request->ModePage_data);
         request->ModePage_data.mute = 1;
-        request->ModePage_data.properties = 1;
-        request->ModePage_data.balance = 1;
+        request->ModePage_data.properties = 0;
         return offsetof(Request, ModePage_data.crc) + 1;
     case WlanPage_AIM:
         request->length += sizeof(request->WlanPage_data);
@@ -825,17 +828,41 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         request->WlanPage_data.online = GetUserCount();
         request->WlanPage_data.length = sizeof(request->WlanPage_data.wlanPage);
         request->WlanPage_data.wlanPage.id = order;
-        request->WlanPage_data.wlanPage.unit = 3;
+        request->WlanPage_data.wlanPage.unit = 0x11;
         get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
         if(wlaninterfaces[order - 1].operstate[1] == 'p')//Up
         {
+
             request->WlanPage_data.wlanPage.uploadspeed = tx_speed;
             request->WlanPage_data.wlanPage.downloadspeed = rx_speed;
+            if(request->WlanPage_data.wlanPage.uploadspeed > 1024)
+            {
+                request->WlanPage_data.wlanPage.unit += 0x10;
+                request->WlanPage_data.wlanPage.uploadspeed /= 1024;
+                if(request->WlanPage_data.wlanPage.uploadspeed > 1024)
+                {
+                    request->WlanPage_data.wlanPage.unit += 0x10;
+                    request->WlanPage_data.wlanPage.uploadspeed /= 1024;
+                    
+                }
+            }
+            if(request->WlanPage_data.wlanPage.downloadspeed > 1024)
+            {
+                request->WlanPage_data.wlanPage.unit += 0x01;
+                request->WlanPage_data.wlanPage.downloadspeed /= 1024;
+                if(request->WlanPage_data.wlanPage.downloadspeed > 1024)
+                {
+                    request->WlanPage_data.wlanPage.unit += 0x01;
+                    request->WlanPage_data.wlanPage.downloadspeed /= 1024;
+                    
+                }
+            }
         }
         else
         {
             request->WlanPage_data.wlanPage.uploadspeed = 0;
             request->WlanPage_data.wlanPage.downloadspeed = 0;
+            
         }
         if (strcmp(wlaninterfaces[order - 1].ip_address, "未分配") != 0 && 
         strcmp(wlaninterfaces[order - 1].ip_address, "0.0.0.0") != 0) {

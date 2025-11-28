@@ -45,6 +45,7 @@ typedef struct {
     unsigned char disklength;
     unsigned char disk_id;      //>= 1
     unsigned char unit;         //01 Kb 02 Mb 03 Gb
+    unsigned char reserve;
     unsigned short total_size;  //Default -1
     unsigned short used_size;   //Default -1
     unsigned char temp;         //Default -1
@@ -58,10 +59,7 @@ typedef struct {
     unsigned char ip[4];
     unsigned char name[20];
 } WlanPage;
-typedef struct __attribute__((__packed__)) {
-    unsigned char count;
-    diskStruct disk[2];
-} DiskPage;
+
 
 // Request HID Report
 typedef struct __attribute__((__packed__)) {
@@ -172,7 +170,6 @@ typedef struct __attribute__((__packed__)) {
             unsigned char count;
             unsigned char mute;
             unsigned char properties;
-            unsigned char balance;
             unsigned char crc;
         } ModePage_data;
     };
