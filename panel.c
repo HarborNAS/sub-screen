@@ -833,7 +833,7 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         request->WlanPage_data.netcount = total;
         request->WlanPage_data.count = 1;
         request->WlanPage_data.online = GetUserCount();
-        request->WlanPage_data.length = sizeof(request->WlanPage_data.wlanPage);
+        request->WlanPage_data.length = (sizeof(request->WlanPage_data.wlanPage) + 1);
         request->WlanPage_data.wlanPage.id = order;
         request->WlanPage_data.wlanPage.unit = 0x11;
         get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
