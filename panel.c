@@ -1841,7 +1841,10 @@ void* hid_send_thread(void* arg) {
                     // printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
                     // printf("DiskCRC: %d\n",request->disk_data.crc);
                     memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                    sleep(1);
+                    // 休眠1秒，但分段休眠以便及时响应退出
+                    for (int i = 0; i < 10 && running; i++) {
+                        usleep(100000); // 100ms
+                    }
                 }
             }
         }
@@ -1879,29 +1882,29 @@ void* hid_send_thread(void* arg) {
                 if (safe_hid_write(handle, hid_report, wlansize) == -1) {
                     printf("Failed to write WlanIP data\n");
                 }
-                sleep(1);
+                TimeSleep1Sec();
                 memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
             }
-        
-        #if DebugToken
-        printf("-----------------------------------WLANIPSendOK-----------------------------------\n");
-        #endif
+            #if DebugToken
+            printf("-----------------------------------WLANIPSendOK-----------------------------------\n");
+            #endif
         }
         switch (PageIndex)
         {
             case HomePage_AIM:
-                // Time
-                int timereportsize = init_hidreport(request, SET, TIME_AIM, 255);
-                append_crc(request);
-                if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
-                    printf("Failed to write TIME data\n");
-                    break;
-                }
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                TimeSleep1Sec();
-                #if DebugToken
-                printf("-----------------------------------TimeSendOK-----------------------------------\n");
-                #endif
+                //Use 10Mins send once
+                // // Time
+                // int timereportsize = init_hidreport(request, SET, TIME_AIM, 255);
+                // append_crc(request);
+                // if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
+                //     printf("Failed to write TIME data\n");
+                //     break;
+                // }
+                // memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                // TimeSleep1Sec();
+                // #if DebugToken
+                // printf("-----------------------------------TimeSendOK-----------------------------------\n");
+                // #endif
                 break;
             case SystemPage_AIM:
                 //*****************************************************/
@@ -1980,7 +1983,13 @@ void* hid_send_thread(void* arg) {
                         // printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
                         // printf("DiskCRC: %d\n",request->disk_data.crc);
                         memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                        sleep(1);
+                        // 休眠1秒，但分段休眠以便及时响应退出
+                        for (int i = 0; i < 10 && running; i++) {
+                            usleep(100000); // 100ms
+                        }
+                        #if DebugToken
+                        printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
+                        #endif
                     }
                 }
                 break;
