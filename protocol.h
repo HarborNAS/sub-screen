@@ -151,16 +151,9 @@ typedef struct __attribute__((__packed__)) {
         struct __attribute__((__packed__)){
             unsigned char order;
             unsigned char total;
-            unsigned short nouse;
-            unsigned char count;
-            unsigned char devnamelength;
-            unsigned char devname[32];
-            unsigned char cpunamelength;
-            unsigned char cpuname[32];
-            unsigned char operatelength;
-            unsigned char operate[32];
-            unsigned char snlength;
-            unsigned char sn[8];
+            unsigned short reserve;
+            unsigned char namelength;
+            unsigned char name[32];
             unsigned char crc;
         } InfoPage_data;
         struct __attribute__((__packed__)){
