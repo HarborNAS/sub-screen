@@ -1398,43 +1398,92 @@ int scan_disk_devices(disk_info_t *disks, int max_disks) {
     
     struct dirent *entry;
     int disk_count = 0;
+    char path[512];
+    FILE *file;
     
     while ((entry = readdir(block_dir)) != NULL && disk_count < max_disks) {
-        // 过滤掉虚拟设备和分区
-        if (strncmp(entry->d_name, "loop", 4) == 0 ||
-            strncmp(entry->d_name, "ram", 3) == 0 ||
-            strncmp(entry->d_name, "fd", 2) == 0 ||
-            strchr(entry->d_name, 'p') != NULL) { // 排除分区
+        // 跳过当前目录和上级目录
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
             continue;
         }
         
-        // 只关注SATA和NVMe设备
+        // 过滤虚拟设备
+        if (strncmp(entry->d_name, "loop", 4) == 0 ||
+            strncmp(entry->d_name, "ram", 3) == 0 ||
+            strncmp(entry->d_name, "fd", 2) == 0) {
+            continue;
+        }
+        
+        // 检查是否为真实物理设备
+        snprintf(path, sizeof(path), "/sys/block/%s/device", entry->d_name);
+        if (access(path, F_OK) != 0) {
+            continue; // 没有device目录，可能是虚拟设备
+        }
+        
+        // 检查是否可移动设备
+        int removable = 0;
+        snprintf(path, sizeof(path), "/sys/block/%s/removable", entry->d_name);
+        file = fopen(path, "r");
+        if (file) {
+            fscanf(file, "%d", &removable);
+            fclose(file);
+        }
+        
+        if (removable) {
+            // 可以选择跳过或标记为可移动设备
+             continue; // 取消注释以跳过可移动设备
+        }
+        
+        // 检查设备大小，过滤掉大小为0的设备（如空的读卡器）
+        unsigned long long size = get_disk_size(entry->d_name);
+        if (size == 0) {
+            continue;
+        }
+        
+        // 更准确的分区检测
+        // 检查是否有子分区或分区标识
+        snprintf(path, sizeof(path), "/sys/block/%s/partition", entry->d_name);
+        if (access(path, F_OK) == 0) {
+            continue; // 这是一个分区
+        }
+        
+        // 检查设备类型，支持更多设备类型
         if (strncmp(entry->d_name, "sd", 2) == 0 || 
-            strncmp(entry->d_name, "nvme", 4) == 0) {
+            strncmp(entry->d_name, "nvme", 4) == 0 ||
+            strncmp(entry->d_name, "hd", 2) == 0 ||      // IDE设备
+            strncmp(entry->d_name, "vd", 2) == 0) {     // VirtIO设备
             
             strncpy(disks[disk_count].device, entry->d_name, 32);
             
             // 确定硬盘类型
             if (strncmp(entry->d_name, "nvme", 4) == 0) {
                 strcpy(disks[disk_count].type, "NVMe");
-            } else {
-                strcpy(disks[disk_count].type, "SATA");
+            } else if (strncmp(entry->d_name, "sd", 2) == 0) {
+                strcpy(disks[disk_count].type, "SATA/USB");
+            } else if (strncmp(entry->d_name, "hd", 2) == 0) {
+                strcpy(disks[disk_count].type, "IDE");
+            } else if (strncmp(entry->d_name, "vd", 2) == 0) {
+                strcpy(disks[disk_count].type, "VirtIO");
             }
+            
+            // 标记是否为可移动设备
+            //disks[disk_count].removable = removable;
             
             // 获取基本信息
             get_disk_identity(entry->d_name, 
                             disks[disk_count].model, 
                             disks[disk_count].serial);
             
-            disks[disk_count].total_size = get_disk_size(entry->d_name)/1024/1024/1024;//Change to Gb
+            disks[disk_count].total_size = size/1024/1024/1024; // Change to GB
+            
             get_mountpoint(entry->d_name, disks[disk_count].mountpoint);
+            
             // 如果有挂载点，获取使用情况
             if (strlen(disks[disk_count].mountpoint) > 0) {
-                
                 unsigned long long total, free, used;
                 if (get_mountpoint_usage(disks[disk_count].mountpoint, &total, &free, &used) == 0) {
-                    disks[disk_count].free_size = free/1024/1024/1024;//Change to Gb
-                    disks[disk_count].used_size = used/1024/1024/1024;//Change to Gb
+                    disks[disk_count].free_size = free/1024/1024/1024; // Change to GB
+                    disks[disk_count].used_size = used/1024/1024/1024; // Change to GB
                     if (total > 0) {
                         disks[disk_count].usage_percent = ((double)used / total) * 100.0;
                     }
