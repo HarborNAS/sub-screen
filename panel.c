@@ -1915,12 +1915,11 @@ void* hid_send_thread(void* arg) {
                     printf("Failed to write CPU data\n");
                     break;
                 }
+                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                TimeSleep1Sec();
                 #if DebugToken
                 printf("-----------------------------------CPUSendOK-----------------------------------\n");
                 #endif
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                TimeSleep1Sec();
-
 
                 systemreportsize = init_hidreport(request, SET, System_AIM,1);        
                 append_crc(request);
@@ -1928,11 +1927,11 @@ void* hid_send_thread(void* arg) {
                     printf("Failed to write iGPU data\n");
                     break;
                 }
+                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                TimeSleep1Sec();
                 #if DebugToken
                 printf("-----------------------------------iGPUSendOK-----------------------------------\n");
                 #endif
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                TimeSleep1Sec();
                 //*****************************************************/
                 // Memory Usage
                 int memusagesize = init_hidreport(request, SET, System_AIM,2);
@@ -1941,12 +1940,11 @@ void* hid_send_thread(void* arg) {
                     printf("Failed to write MEMORY data\n");
                     break;
                 }
+                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                TimeSleep1Sec();
                 #if DebugToken
                 printf("-----------------------------------MemorySendOK-----------------------------------\n");
                 #endif
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                TimeSleep1Sec();
-
                 if(IsNvidiaGPU)
                 {
                     int dgpusize = init_hidreport(request, SET, System_AIM,3);
@@ -1955,11 +1953,11 @@ void* hid_send_thread(void* arg) {
                         printf("Failed to write GPU data\n");
                     break;
                     }
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    TimeSleep1Sec();
                     #if DebugToken
                     printf("-----------------------------------GPUSendOK-----------------------------------\n");
                     #endif
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                    TimeSleep1Sec();
                 }
                 break;
             case DiskPage_AIM:
@@ -1971,15 +1969,11 @@ void* hid_send_thread(void* arg) {
                             disk_maxtemp = disks[i].temperature;
                         }
                         int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
-
                         append_crc(request);
                         if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
                         printf("Failed to write Disk data\n");
                         break;
                         }
-                        #if DebugToken
-                        printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
-                        #endif
                         // printf("diskreportsize: %d\n",diskreportsize);
                         // printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
                         // printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
@@ -2012,12 +2006,11 @@ void* hid_send_thread(void* arg) {
                     printf("Failed to write USER data\n");
                     break;
                 }
+                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                TimeSleep1Sec();
                 #if DebugToken
                 printf("-----------------------------------UserSendOK-----------------------------------\n");
                 #endif
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                TimeSleep1Sec();
-                
                 
                 int wlanspeedsize = init_hidreport(request, SET, WlanSpeed_AIM,255);
                 append_crc(request);
@@ -2025,11 +2018,23 @@ void* hid_send_thread(void* arg) {
                     printf("Failed to write WLANSpeed data\n");
                 break;
                 }
+                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                TimeSleep1Sec();
                 #if DebugToken
                 printf("-----------------------------------WLANSpeedSendOK-----------------------------------\n");
                 #endif
+
+                int wlantotalsize = init_hidreport(request, SET, WlanTotal_AIM,255);
+                append_crc(request);
+                if (safe_hid_write(handle, hid_report, wlantotalsize) == -1) {
+                    printf("Failed to write WLANTotal data\n");
+                break;
+                }
                 memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
                 TimeSleep1Sec();
+                #if DebugToken
+                printf("-----------------------------------WLANTotalSendOK-----------------------------------\n");
+                #endif
                 break;
         
         default:
