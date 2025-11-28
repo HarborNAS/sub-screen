@@ -223,6 +223,7 @@ void get_system_info(system_info_t *info);
 
 
 int cputemp,cpusuage,cpufan,memoryusage,wlancount;
+bool Isinitial = false;
 unsigned char hid_report[MAXLEN] = {0};
 unsigned char ack[MAXLEN] = {0};
 system_info_t sys_info;
@@ -334,7 +335,7 @@ int main(void) {
     if (safe_hid_write(handle, hid_report, homepage) == -1) {
         printf("Failed to write HomePage data\n");
     }
-    sleep(3);
+    sleep(1);
     memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
     #if DebugToken
     printf("-----------------------------------HomePage initial end-----------------------------------\n");
@@ -470,6 +471,10 @@ int main(void) {
     #if DebugToken
     printf("-----------------------------------InfoPage initial end-----------------------------------\n");
     #endif
+
+
+    Isinitial = true;
+
     while (running) {
 
         //TimeSleep1Sec();
@@ -1893,163 +1898,24 @@ void* hid_send_thread(void* arg) {
     printf("HID send thread start\n");
     
     while (running) {
-        // 发送HID数据
-        if(HourTimeDiv % 60 == 0)
+        if(Isinitial)
         {
-            //1 Min Do
-            for (int i = 0; i < disk_count; i++) {
-                if (disks[i].temperature != -1) {
-                    int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
-
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
-                    printf("Failed to write Disk data\n");
-                    break;
-                    }
-                    #if DebugToken
-                    printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
-                    #endif
-                    // printf("diskreportsize: %d\n",diskreportsize);
-                    // printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
-                    // printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
-                    // printf("Disktotal: %d\n",request->disk_data.disk_info.total_size);
-                    // printf("Diskused: %d\n",request->disk_data.disk_info.used_size);
-                    // printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
-                    // printf("DiskCRC: %d\n",request->disk_data.crc);
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                    // 休眠1秒，但分段休眠以便及时响应退出
-                    for (int i = 0; i < 10 && running; i++) {
-                        usleep(100000); // 100ms
-                    }
-                }
-            }
-        }
-        if(HourTimeDiv % 600 == 0)
-        {
-            // Time
-            int timereportsize = init_hidreport(request, SET, TIME_AIM, 255);
-            append_crc(request);
-            if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
-                printf("Failed to write TIME data\n");
-                break;
-            }
-            memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-            TimeSleep1Sec();
-            #if DebugToken
-            printf("-----------------------------------TimeSendOK-----------------------------------\n");
-            #endif
-            //WLAN IP
-            int wlansize;
-            wlansize = init_hidreport(request, SET, WlanTotal_AIM,255);
-            append_crc(request);
-            if (safe_hid_write(handle, hid_report, wlansize) == -1) {
-                printf("Failed to write WLANTotal data\n");
-            break;
-            }
-            memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-            TimeSleep1Sec();
-            #if DebugToken
-            printf("-----------------------------------TotalflowSendOK-----------------------------------\n");
-            #endif
-            for (int i = 0; i < wlancount; i++)
+            // 发送HID数据
+            if(HourTimeDiv % 60 == 0)
             {
-                wlansize = init_hidreport(request, SET, WlanIP_AIM, i + 1);
-                append_crc(request);
-                if (safe_hid_write(handle, hid_report, wlansize) == -1) {
-                    printf("Failed to write WlanIP data\n");
-                }
-                TimeSleep1Sec();
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-            }
-            #if DebugToken
-            printf("-----------------------------------WLANIPSendOK-----------------------------------\n");
-            #endif
-        }
-        switch (PageIndex)
-        {
-            case HomePage_AIM:
-                //Use 10Mins send once
-                // // Time
-                // int timereportsize = init_hidreport(request, SET, TIME_AIM, 255);
-                // append_crc(request);
-                // if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
-                //     printf("Failed to write TIME data\n");
-                //     break;
-                // }
-                // memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                // TimeSleep1Sec();
-                // #if DebugToken
-                // printf("-----------------------------------TimeSendOK-----------------------------------\n");
-                // #endif
-                break;
-            case SystemPage_AIM:
-                //*****************************************************/
-                // CPU
-                int systemreportsize = init_hidreport(request, SET, System_AIM,0);
-                append_crc(request);
-                if (safe_hid_write(handle, hid_report, systemreportsize) == -1) {
-                    printf("Failed to write CPU data\n");
-                    break;
-                }
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                TimeSleep1Sec();
-                #if DebugToken
-                printf("-----------------------------------CPUSendOK-----------------------------------\n");
-                #endif
-
-                systemreportsize = init_hidreport(request, SET, System_AIM,1);        
-                append_crc(request);
-                if (safe_hid_write(handle, hid_report, systemreportsize) == -1) {
-                    printf("Failed to write iGPU data\n");
-                    break;
-                }
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                TimeSleep1Sec();
-                #if DebugToken
-                printf("-----------------------------------iGPUSendOK-----------------------------------\n");
-                #endif
-                //*****************************************************/
-                // Memory Usage
-                int memusagesize = init_hidreport(request, SET, System_AIM,2);
-                append_crc(request);
-                if (safe_hid_write(handle, hid_report, memusagesize) == -1) {
-                    printf("Failed to write MEMORY data\n");
-                    break;
-                }
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                TimeSleep1Sec();
-                #if DebugToken
-                printf("-----------------------------------MemorySendOK-----------------------------------\n");
-                #endif
-                if(IsNvidiaGPU)
-                {
-                    int dgpusize = init_hidreport(request, SET, System_AIM,3);
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, dgpusize) == -1) {
-                        printf("Failed to write GPU data\n");
-                    break;
-                    }
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                    TimeSleep1Sec();
-                    #if DebugToken
-                    printf("-----------------------------------GPUSendOK-----------------------------------\n");
-                    #endif
-                }
-                break;
-            case DiskPage_AIM:
-                int disk_maxtemp = 0;
+                //1 Min Do
                 for (int i = 0; i < disk_count; i++) {
                     if (disks[i].temperature != -1) {
-                        if(disk_maxtemp < disks[i].temperature)
-                        {
-                            disk_maxtemp = disks[i].temperature;
-                        }
                         int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
+
                         append_crc(request);
                         if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
                         printf("Failed to write Disk data\n");
                         break;
                         }
+                        #if DebugToken
+                        printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
+                        #endif
                         // printf("diskreportsize: %d\n",diskreportsize);
                         // printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
                         // printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
@@ -2062,62 +1928,203 @@ void* hid_send_thread(void* arg) {
                         for (int i = 0; i < 10 && running; i++) {
                             usleep(100000); // 100ms
                         }
-                        #if DebugToken
-                        printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
-                        #endif
                     }
                 }
-                // 获取 I/O 权限
-                acquire_io_permissions();
-                ec_ram_write_byte(0xB1,disk_maxtemp);
-                // 释放 I/O 权限
-                release_io_permissions();
-                break;
-            case WlanPage_AIM:
-                //*****************************************************/
-                // User Online
-                int usersize = init_hidreport(request, SET, USER_AIM,255);
+            }
+            if(HourTimeDiv % 600 == 0)
+            {
+                // Time
+                int timereportsize = init_hidreport(request, SET, TIME_AIM, 255);
                 append_crc(request);
-                if (safe_hid_write(handle, hid_report, usersize) == -1) {
-                    printf("Failed to write USER data\n");
+                if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
+                    printf("Failed to write TIME data\n");
                     break;
                 }
                 memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
                 TimeSleep1Sec();
                 #if DebugToken
-                printf("-----------------------------------UserSendOK-----------------------------------\n");
+                printf("-----------------------------------TimeSendOK-----------------------------------\n");
                 #endif
-                
-                int wlanspeedsize = init_hidreport(request, SET, WlanSpeed_AIM,255);
+                //WLAN IP
+                int wlansize;
+                wlansize = init_hidreport(request, SET, WlanTotal_AIM,255);
                 append_crc(request);
-                if (safe_hid_write(handle, hid_report, wlanspeedsize) == -1) {
-                    printf("Failed to write WLANSpeed data\n");
-                break;
-                }
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                TimeSleep1Sec();
-                #if DebugToken
-                printf("-----------------------------------WLANSpeedSendOK-----------------------------------\n");
-                #endif
-
-                int wlantotalsize = init_hidreport(request, SET, WlanTotal_AIM,255);
-                append_crc(request);
-                if (safe_hid_write(handle, hid_report, wlantotalsize) == -1) {
+                if (safe_hid_write(handle, hid_report, wlansize) == -1) {
                     printf("Failed to write WLANTotal data\n");
                 break;
                 }
                 memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
                 TimeSleep1Sec();
                 #if DebugToken
-                printf("-----------------------------------WLANTotalSendOK-----------------------------------\n");
+                printf("-----------------------------------TotalflowSendOK-----------------------------------\n");
                 #endif
+                for (int i = 0; i < wlancount; i++)
+                {
+                    wlansize = init_hidreport(request, SET, WlanIP_AIM, i + 1);
+                    append_crc(request);
+                    if (safe_hid_write(handle, hid_report, wlansize) == -1) {
+                        printf("Failed to write WlanIP data\n");
+                    }
+                    TimeSleep1Sec();
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                }
+                #if DebugToken
+                printf("-----------------------------------WLANIPSendOK-----------------------------------\n");
+                #endif
+            }
+            switch (PageIndex)
+            {
+                case HomePage_AIM:
+                    //Use 10Mins send once
+                    // // Time
+                    // int timereportsize = init_hidreport(request, SET, TIME_AIM, 255);
+                    // append_crc(request);
+                    // if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
+                    //     printf("Failed to write TIME data\n");
+                    //     break;
+                    // }
+                    // memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    // TimeSleep1Sec();
+                    // #if DebugToken
+                    // printf("-----------------------------------TimeSendOK-----------------------------------\n");
+                    // #endif
+                    break;
+                case SystemPage_AIM:
+                    //*****************************************************/
+                    // CPU
+                    int systemreportsize = init_hidreport(request, SET, System_AIM,0);
+                    append_crc(request);
+                    if (safe_hid_write(handle, hid_report, systemreportsize) == -1) {
+                        printf("Failed to write CPU data\n");
+                        break;
+                    }
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    TimeSleep1Sec();
+                    #if DebugToken
+                    printf("-----------------------------------CPUSendOK-----------------------------------\n");
+                    #endif
+
+                    systemreportsize = init_hidreport(request, SET, System_AIM,1);        
+                    append_crc(request);
+                    if (safe_hid_write(handle, hid_report, systemreportsize) == -1) {
+                        printf("Failed to write iGPU data\n");
+                        break;
+                    }
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    TimeSleep1Sec();
+                    #if DebugToken
+                    printf("-----------------------------------iGPUSendOK-----------------------------------\n");
+                    #endif
+                    //*****************************************************/
+                    // Memory Usage
+                    int memusagesize = init_hidreport(request, SET, System_AIM,2);
+                    append_crc(request);
+                    if (safe_hid_write(handle, hid_report, memusagesize) == -1) {
+                        printf("Failed to write MEMORY data\n");
+                        break;
+                    }
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    TimeSleep1Sec();
+                    #if DebugToken
+                    printf("-----------------------------------MemorySendOK-----------------------------------\n");
+                    #endif
+                    if(IsNvidiaGPU)
+                    {
+                        int dgpusize = init_hidreport(request, SET, System_AIM,3);
+                        append_crc(request);
+                        if (safe_hid_write(handle, hid_report, dgpusize) == -1) {
+                            printf("Failed to write GPU data\n");
+                        break;
+                        }
+                        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                        TimeSleep1Sec();
+                        #if DebugToken
+                        printf("-----------------------------------GPUSendOK-----------------------------------\n");
+                        #endif
+                    }
+                    break;
+                case DiskPage_AIM:
+                    int disk_maxtemp = 0;
+                    for (int i = 0; i < disk_count; i++) {
+                        if (disks[i].temperature != -1) {
+                            if(disk_maxtemp < disks[i].temperature)
+                            {
+                                disk_maxtemp = disks[i].temperature;
+                            }
+                            int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
+                            append_crc(request);
+                            if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
+                            printf("Failed to write Disk data\n");
+                            break;
+                            }
+                            // printf("diskreportsize: %d\n",diskreportsize);
+                            // printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
+                            // printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
+                            // printf("Disktotal: %d\n",request->disk_data.disk_info.total_size);
+                            // printf("Diskused: %d\n",request->disk_data.disk_info.used_size);
+                            // printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
+                            // printf("DiskCRC: %d\n",request->disk_data.crc);
+                            memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                            // 休眠1秒，但分段休眠以便及时响应退出
+                            for (int i = 0; i < 10 && running; i++) {
+                                usleep(100000); // 100ms
+                            }
+                            #if DebugToken
+                            printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
+                            #endif
+                        }
+                    }
+                    // 获取 I/O 权限
+                    acquire_io_permissions();
+                    ec_ram_write_byte(0xB1,disk_maxtemp);
+                    // 释放 I/O 权限
+                    release_io_permissions();
+                    break;
+                case WlanPage_AIM:
+                    //*****************************************************/
+                    // User Online
+                    int usersize = init_hidreport(request, SET, USER_AIM,255);
+                    append_crc(request);
+                    if (safe_hid_write(handle, hid_report, usersize) == -1) {
+                        printf("Failed to write USER data\n");
+                        break;
+                    }
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    TimeSleep1Sec();
+                    #if DebugToken
+                    printf("-----------------------------------UserSendOK-----------------------------------\n");
+                    #endif
+                    
+                    int wlanspeedsize = init_hidreport(request, SET, WlanSpeed_AIM,255);
+                    append_crc(request);
+                    if (safe_hid_write(handle, hid_report, wlanspeedsize) == -1) {
+                        printf("Failed to write WLANSpeed data\n");
+                    break;
+                    }
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    TimeSleep1Sec();
+                    #if DebugToken
+                    printf("-----------------------------------WLANSpeedSendOK-----------------------------------\n");
+                    #endif
+
+                    int wlantotalsize = init_hidreport(request, SET, WlanTotal_AIM,255);
+                    append_crc(request);
+                    if (safe_hid_write(handle, hid_report, wlantotalsize) == -1) {
+                        printf("Failed to write WLANTotal data\n");
+                    break;
+                    }
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    TimeSleep1Sec();
+                    #if DebugToken
+                    printf("-----------------------------------WLANTotalSendOK-----------------------------------\n");
+                    #endif
+                    break;
+            
+            default:
                 break;
-        
-        default:
-            break;
+            }
         }
     }
-    
     printf("HID send thread exited\n");
     return NULL;
 }
