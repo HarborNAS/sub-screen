@@ -3,7 +3,7 @@ Description=HarborOS Subscreen Service
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/panel
+ExecStart=/usr/bin/harboros-subscreen
 Restart=on-failure
 RestartSec=5s
 
