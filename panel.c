@@ -222,8 +222,9 @@ void get_system_info(system_info_t *info);
 
 
 
-int cputemp,cpusuage,cpufan,memoryusage,wlancount;
+int cpusuage,cpufan,memoryusage,wlancount;
 bool Isinitial = false;
+unsigned char cputemp = 0;
 unsigned char hid_report[MAXLEN] = {0};
 unsigned char ack[MAXLEN] = {0};
 system_info_t sys_info;
@@ -248,7 +249,6 @@ int main(void) {
     // 初始化数据
     handle = hid_open(VENDORID, PRODUCTID, NULL);
     IsNvidiaGPU = nvidia_smi_available();
-    cputemp = get_cpu_temperature();
     init_traffic(&traffic);
     get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
     
