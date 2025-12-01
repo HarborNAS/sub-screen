@@ -558,7 +558,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
             unsigned char CPU_fan_H = 0,CPU_fan_L = 0;
             ec_ram_read_byte(0x76,&CPU_fan_H);
             ec_ram_read_byte(0x77,&CPU_fan_L);
-            request->system_data.system_info.rpm = (CPU_fan_H * 0xFF + CPU_fan_L) / 4200;
+            request->system_data.system_info.rpm = (CPU_fan_H * 0xFF + CPU_fan_L) / 42;
             // 释放 I/O 权限
             release_io_permissions();
         }
@@ -570,7 +570,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
             unsigned char CPU_fan_H = 0,CPU_fan_L = 0;
             ec_ram_read_byte(0x76,&CPU_fan_H);
             ec_ram_read_byte(0x77,&CPU_fan_L);
-            request->system_data.system_info.rpm = (CPU_fan_H * 0xFF + CPU_fan_L) / 4200;
+            request->system_data.system_info.rpm = (CPU_fan_H * 0xFF + CPU_fan_L) / 42;
             // 释放 I/O 权限
             release_io_permissions();
         }
