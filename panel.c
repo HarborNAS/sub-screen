@@ -774,7 +774,7 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         else if(order == 2)
         {
             request->SystemPage_data.systemPage[0].syslength = sizeof(request->SystemPage_data.systemPage[0]);
-            request->SystemPage_data.systemPage[0].sys_id = 3;
+            request->SystemPage_data.systemPage[0].sys_id = 2;
             request->SystemPage_data.systemPage[0].usage = get_memory_usage();
             request->SystemPage_data.systemPage[0].temp = 255;//No temp
             request->SystemPage_data.systemPage[0].rpm = 255;//No fan
