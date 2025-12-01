@@ -21,10 +21,10 @@ cat directive.txt | bash
 3. Support HomePage 2025/11/11 testOK
 4. Support SystemPage(CPU,IGPU,Memory,NVDGPU) 2025/11/11 testOK
 5. Support DiskPage 2025/11/11 testOK
-
+6. Support WLANPage
+7. Support PowerPage
+8. Support SleepPage
+9. Support LocalPage
 ## TODO
 
-1. WLANPage
-2. PowerPage
-3. SleepPage
-4. LocalPage
+NA
