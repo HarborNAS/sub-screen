@@ -153,7 +153,7 @@ typedef struct __attribute__((__packed__)) {
             unsigned char total;
             unsigned short reserve;
             unsigned char namelength;
-            unsigned char name[32];
+            unsigned char name[48];
             unsigned char crc;
         } InfoPage_data;
         struct __attribute__((__packed__)){
