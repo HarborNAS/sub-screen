@@ -545,7 +545,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         request->system_data.system_info.sys_id = id;
         if(id == 0)
         {
-            request->system_data.system_info.temerature = get_cpu_temperature();
+            
             // 读取当前CPU数据
             read_cpu_data(&curr_data);
             // 计算CPU使用率
@@ -555,6 +555,9 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
             prev_data = curr_data;
             // 获取 I/O 权限
             acquire_io_permissions();
+            ec_ram_read_byte(0x70,&cputemp);
+            request->system_data.system_info.temerature = cputemp;
+            
             unsigned char CPU_fan_H = 0,CPU_fan_L = 0;
             ec_ram_read_byte(0x76,&CPU_fan_H);
             ec_ram_read_byte(0x77,&CPU_fan_L);
@@ -750,12 +753,14 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             request->SystemPage_data.systemPage[0].usage = calculate_cpu_usage(&prev_data, &curr_data);
             // 更新前一次的数据
             prev_data = curr_data;
-            request->SystemPage_data.systemPage[0].temp = get_cpu_temperature();
             // 获取 I/O 权限
             acquire_io_permissions();
-            unsigned char CPU_fan = 0;
-            ec_ram_read_byte(0x70,&CPU_fan);
-            request->SystemPage_data.systemPage[0].rpm = CPU_fan;
+            ec_ram_read_byte(0x70,&cputemp);
+            request->SystemPage_data.systemPage[0].temp = cputemp;
+            unsigned char CPU_fan_H = 0,CPU_fan_L = 0;
+            ec_ram_read_byte(0x76,&CPU_fan_H);
+            ec_ram_read_byte(0x77,&CPU_fan_L);
+            request->SystemPage_data.systemPage[0].rpm = (CPU_fan_H * 0xFF + CPU_fan_L) / 42;
             request->SystemPage_data.systemPage[0].name[0] = 'C';
             request->SystemPage_data.systemPage[0].name[1] = 'P';
             request->SystemPage_data.systemPage[0].name[2] = 'U';
