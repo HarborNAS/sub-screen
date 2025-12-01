@@ -1927,8 +1927,7 @@ void* hid_read_thread(void *arg) {
             else if (res >= 6 && 
                      read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
                      read_buf[2] == 0xff && read_buf[3] == 0x04 &&
-                     read_buf[4] == 0x03 && read_buf[5] == 0x82 &&
-                     read_buf[6] == 0x87) {
+                     read_buf[4] == 0x03 && read_buf[5] == 0x82) {
                 printf(">>> Hibernate command received!\n");
                 systemoperation(HIBERNATEATONCE_AIM,0);
                 //system("shutdown -h now");
