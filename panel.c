@@ -1474,19 +1474,20 @@ int scan_disk_devices(disk_info_t *disks, int max_disks) {
         
         // 跳过可移动设备
         if (removable) {
-            // 检查是否有介质
-            snprintf(path, sizeof(path), "/sys/block/%s/size", entry->d_name);
-            file = fopen(path, "r");
-            if (file) {
-                unsigned long long size_blocks = 0;
-                fscanf(file, "%llu", &size_blocks);
-                fclose(file);
-                if (size_blocks == 0) {
-                    continue; // 可移动设备但没有介质
-                }
-            } else {
-                continue; // 无法读取size，可能是无效设备
-            }
+            continue;
+            // // 检查是否有介质
+            // snprintf(path, sizeof(path), "/sys/block/%s/size", entry->d_name);
+            // file = fopen(path, "r");
+            // if (file) {
+            //     unsigned long long size_blocks = 0;
+            //     fscanf(file, "%llu", &size_blocks);
+            //     fclose(file);
+            //     if (size_blocks == 0) {
+            //         continue; // 可移动设备但没有介质
+            //     }
+            // } else {
+            //     continue; // 无法读取size，可能是无效设备
+            // }
         }
         
         // 检查设备大小，过滤掉大小为0的设备
