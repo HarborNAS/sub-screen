@@ -1367,19 +1367,21 @@ unsigned long long get_disk_size(const char *device) {
 }
 int GetUserCount()
 {
-    setutent();
-    //Clear count
-    int user_count = 0;
-    // 遍历所有记录
-    while ((ut = getutent()) != NULL) {
-        // USER_PROCESS 表示活跃的用户登录会话
-        if (ut->ut_type == USER_PROCESS) {
-            user_count++;
-        }
+    FILE *fp;
+    char buffer[1024];
+    int count = 0;
+    
+    fp = popen("who | wc -l", "r");
+    if (fp == NULL) {
+        return -1;
     }
-    // 关闭文件
-    endutent();
-    return user_count;
+    
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        count = atoi(buffer);
+    }
+    
+    pclose(fp);
+    return count;
 }
 // 获取挂载点
 void get_mountpoint(const char *device, char *mountpoint) {
