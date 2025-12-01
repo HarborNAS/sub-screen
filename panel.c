@@ -1437,7 +1437,7 @@ int scan_disk_devices(disk_info_t *disks, int max_disks) {
     
     struct dirent *entry;
     int disk_count = 0;
-    char path[512];
+    char path[1024];
     FILE *file;
     
     while ((entry = readdir(block_dir)) != NULL && disk_count < max_disks) {
@@ -1449,7 +1449,9 @@ int scan_disk_devices(disk_info_t *disks, int max_disks) {
         // 过滤虚拟设备
         if (strncmp(entry->d_name, "loop", 4) == 0 ||
             strncmp(entry->d_name, "ram", 3) == 0 ||
-            strncmp(entry->d_name, "fd", 2) == 0) {
+            strncmp(entry->d_name, "fd", 2) == 0 ||
+            strncmp(entry->d_name, "sr", 2) == 0 ||    // 光驱
+            strncmp(entry->d_name, "dm-", 3) == 0) {  // device mapper
             continue;
         }
         
@@ -1468,29 +1470,68 @@ int scan_disk_devices(disk_info_t *disks, int max_disks) {
             fclose(file);
         }
         
+        // 跳过可移动设备
         if (removable) {
-            // 可以选择跳过或标记为可移动设备
-             continue; // 取消注释以跳过可移动设备
+            // 检查是否有介质
+            snprintf(path, sizeof(path), "/sys/block/%s/size", entry->d_name);
+            file = fopen(path, "r");
+            if (file) {
+                unsigned long long size_blocks = 0;
+                fscanf(file, "%llu", &size_blocks);
+                fclose(file);
+                if (size_blocks == 0) {
+                    continue; // 可移动设备但没有介质
+                }
+            } else {
+                continue; // 无法读取size，可能是无效设备
+            }
         }
         
-        // 检查设备大小，过滤掉大小为0的设备（如空的读卡器）
+        // 检查设备大小，过滤掉大小为0的设备
         unsigned long long size = get_disk_size(entry->d_name);
         if (size == 0) {
             continue;
         }
         
         // 更准确的分区检测
-        // 检查是否有子分区或分区标识
         snprintf(path, sizeof(path), "/sys/block/%s/partition", entry->d_name);
         if (access(path, F_OK) == 0) {
             continue; // 这是一个分区
         }
         
-        // 检查设备类型，支持更多设备类型
+        // 检查是否有子分区（如果有分区表，通常会有子设备）
+        int has_partitions = 0;
+        DIR *subdir;
+        char subpath[1024];
+        snprintf(path, sizeof(path), "/sys/block/%s", entry->d_name);
+        subdir = opendir(path);
+        if (subdir) {
+            struct dirent *subentry;
+            while ((subentry = readdir(subdir)) != NULL) {
+                if (strncmp(subentry->d_name, entry->d_name, strlen(entry->d_name)) == 0) {
+                    // 检查是否是分区设备（如sdb1, sdb2等）
+                    snprintf(subpath, sizeof(subpath), "/sys/block/%s/%s/partition", 
+                            entry->d_name, subentry->d_name);
+                    if (access(subpath, F_OK) == 0) {
+                        has_partitions = 1;
+                        break;
+                    }
+                }
+            }
+            closedir(subdir);
+        }
+        
+        // 支持更多设备类型
         if (strncmp(entry->d_name, "sd", 2) == 0 || 
             strncmp(entry->d_name, "nvme", 4) == 0 ||
             strncmp(entry->d_name, "hd", 2) == 0 ||      // IDE设备
             strncmp(entry->d_name, "vd", 2) == 0) {     // VirtIO设备
+            
+            // 额外的设备可用性检查
+            snprintf(path, sizeof(path), "/dev/%s", entry->d_name);
+            if (access(path, F_OK) != 0) {
+                continue; // 设备节点不存在
+            }
             
             strncpy(disks[disk_count].device, entry->d_name, 32);
             
@@ -1498,7 +1539,23 @@ int scan_disk_devices(disk_info_t *disks, int max_disks) {
             if (strncmp(entry->d_name, "nvme", 4) == 0) {
                 strcpy(disks[disk_count].type, "NVMe");
             } else if (strncmp(entry->d_name, "sd", 2) == 0) {
-                strcpy(disks[disk_count].type, "SATA/USB");
+                // 进一步区分SATA和USB
+                snprintf(path, sizeof(path), "/sys/block/%s/device/vendor", entry->d_name);
+                file = fopen(path, "r");
+                if (file) {
+                    char vendor[64] = {0};
+                    if (fgets(vendor, sizeof(vendor), file)) {
+                        // 可以根据vendor信息更准确判断
+                        if (strstr(vendor, "USB") || strstr(vendor, "usb")) {
+                            strcpy(disks[disk_count].type, "USB");
+                        } else {
+                            strcpy(disks[disk_count].type, "SATA");
+                        }
+                    }
+                    fclose(file);
+                } else {
+                    strcpy(disks[disk_count].type, "SATA/USB");
+                }
             } else if (strncmp(entry->d_name, "hd", 2) == 0) {
                 strcpy(disks[disk_count].type, "IDE");
             } else if (strncmp(entry->d_name, "vd", 2) == 0) {
