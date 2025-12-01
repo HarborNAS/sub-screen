@@ -770,7 +770,7 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             //Todo
             request->SystemPage_data.systemPage[1].usage = get_igpu_usage();;
             request->SystemPage_data.systemPage[1].temp = get_igpu_temperature();
-            request->SystemPage_data.systemPage[1].rpm = CPU_fan;
+            request->SystemPage_data.systemPage[1].rpm = (CPU_fan_H * 0xFF + CPU_fan_L) / 42;
             request->SystemPage_data.systemPage[1].name[0] = 'i';
             request->SystemPage_data.systemPage[1].name[1] = 'G';
             request->SystemPage_data.systemPage[1].name[2] = 'P';
