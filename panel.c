@@ -14,7 +14,7 @@
 #include <utmp.h>
 #include <sys/stat.h>
 #include <sys/mount.h>
-
+#include <sys/statvfs.h>
 #include <sys/io.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -37,6 +37,7 @@
 #include <sys/socket.h>
 #include <net/if.h>
 #include <netinet/in.h>
+#include <ifaddrs.h>
 #include <arpa/inet.h>
 #include <linux/ethtool.h>
 #include <linux/sockios.h>
@@ -128,7 +129,12 @@ int init_hidreport(Request *request, unsigned char cmd, unsigned char aim, unsig
 int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char total,unsigned char order);
 void append_crc(Request *request);
 unsigned char cal_crc(unsigned char * data, int len);
+int is_truenas_system(void);
 int get_cpu_temperature();
+int read_temperature_from_hwmon(void);
+int read_temperature_for_truenas(void);
+int read_temperature_via_truenas_api(void);
+int read_temperature_freebsd_style(void);
 void read_cpu_data(CPUData *data);
 float calculate_cpu_usage(const CPUData *prev, const CPUData *curr);
 int get_igpu_temperature();
@@ -141,7 +147,7 @@ int get_disk_temperature(const char *device);
 void get_disk_identity(const char *device, char *model, char *serial);
 unsigned long long get_disk_size(const char *device);
 void get_mountpoint(const char *device, char *mountpoint);
-int get_mountpoint_usage(const char *mountpoint, unsigned long long *total, 
+int get_mountpoint_usage_statvfs(const char *mountpoint, unsigned long long *total, 
                         unsigned long long *free, unsigned long long *used);
 int scan_disk_devices(disk_info_t *disks, int max_disks);
 
@@ -248,16 +254,23 @@ int main(void) {
     #endif
     // 初始化数据
     handle = hid_open(VENDORID, PRODUCTID, NULL);
-    IsNvidiaGPU = nvidia_smi_available();
-    init_traffic(&traffic);
-    get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
     
+    #if !IfNoPanel
     if (handle == NULL) {
         printf("ERROR: Failed to open device %04x:%04x\n", VENDORID, PRODUCTID);
         res = hid_exit();
         return 0;
     }
+    #endif
+   
     #if DebugToken
+    printf("HID device opened successfully\n");
+    #endif
+    #endif
+    IsNvidiaGPU = nvidia_smi_available();
+    init_traffic(&traffic);
+    get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
+     #if DebugToken
     printf("物理网络接口信息获取工具\n");
     printf("=======================\n\n");
     #endif
@@ -267,12 +280,8 @@ int main(void) {
         printf("未发现物理网络接口\n");
         return 1;
     }
-    #if DebugToken
     print_all_interfaces();
-    
-    printf("HID device opened successfully\n");
-    #endif
-    #endif
+    printf("CPUTemp:,%d\n",get_cpu_temperature());
     // 创建读取线程
     #if !IfNoPanel
     if (pthread_create(&read_thread, NULL, hid_read_thread, handle) != 0) {
@@ -1049,31 +1058,282 @@ unsigned char cal_crc(unsigned char * data, int len) {
     #endif
     return (unsigned char)(crc & 0xff);
 }
-
-int get_cpu_temperature() {
-    FILE *thermal_file;
-    int temperature = 0;
-    char path[256] = {0};
+// 检查是否为TrueNAS系统
+int is_truenas_system(void) {
+    FILE *fp;
+    char line[256];
     
-    // 尝试不同的thermal zone
-    for (int i = 0; i < 10; i++) {
-        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", i);
-        thermal_file = fopen(path, "r");
-        if (thermal_file != NULL) {
-            int temp;
-            if (fscanf(thermal_file, "%d", &temp) == 1) {
-                temperature = temp / 1000.0;
-                fclose(thermal_file);
-                return temperature;
+    // 方法1: 检查/etc/os-release
+    fp = fopen("/etc/os-release", "r");
+    if (fp) {
+        while (fgets(line, sizeof(line), fp)) {
+            if (strstr(line, "truenas") || strstr(line, "TrueNAS")) {
+                fclose(fp);
+                return 1;
             }
-            fclose(thermal_file);
+        }
+        fclose(fp);
+    }
+    
+    // 方法2: 检查是否存在TrueNAS特定文件
+    if (access("/usr/local/bin/midclt", F_OK) == 0 ||
+        access("/etc/network/truenas", F_OK) == 0) {
+        return 1;
+    }
+    
+    return 0;
+}
+int get_cpu_temperature() {
+    FILE *temp_file;
+    char path[512];
+    int temperature = -1;
+    
+    // 方法1: 尝试标准thermal zones
+    for (int i = 0; i < 20; i++) {
+        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", i);
+        temp_file = fopen(path, "r");
+        if (temp_file != NULL) {
+            int temp_raw;
+            if (fscanf(temp_file, "%d", &temp_raw) == 1) {
+                temperature = temp_raw / 1000;
+                fclose(temp_file);
+                
+                // 验证温度值是否合理
+                if (temperature > 0 && temperature < 150) {
+                    return temperature;
+                }
+            }
+            fclose(temp_file);
+        }
+    }
+    // 方法2: 尝试hwmon接口 (更通用)
+    temperature = read_temperature_from_hwmon();
+    if (temperature != -1) {
+        return temperature;
+    }
+    // 方法5: 如果是TrueNAS，尝试特定路径
+    if (is_truenas_system()) {
+        temperature = read_temperature_for_truenas();
+        if (temperature != -1) {
+            return temperature;
         }
     }
     
-    // 如果找不到温度文件，返回错误值
+    return -1;
+}
+// 安全路径构建辅助函数
+static int safe_path_join(char *dest, size_t dest_size, 
+                         const char *path1, const char *path2) {
+    if (!dest || !path1 || !path2) return -1;
+    
+    size_t len1 = strlen(path1);
+    size_t len2 = strlen(path2);
+    size_t total_len = len1 + len2 + 2; // +1 for '/', +1 for '\0'
+    
+    if (total_len > dest_size) {
+        // 缓冲区不足，进行安全截断
+        if (dest_size > len2 + 2) {
+            // 可以容纳部分路径1
+            size_t max_len1 = dest_size - len2 - 2;
+            strncpy(dest, path1, max_len1);
+            dest[max_len1] = '\0';
+            strcat(dest, "/");
+            strcat(dest, path2);
+            return 1; // 表示有截断
+        } else {
+            // 空间严重不足
+            dest[0] = '\0';
+            return -1;
+        }
+    }
+    
+    snprintf(dest, dest_size, "%s/%s", path1, path2);
+    return 0;
+}
+// 从hwmon子系统读取温度
+int read_temperature_from_hwmon(void) {
+    DIR *dir;
+    struct dirent *entry;
+    char hwmon_path[PATH_MAX];
+    char temp_path[PATH_MAX];
+    char name_path[PATH_MAX];
+    FILE *temp_file;
+    int max_temp = -1;
+    
+    // 使用PATH_MAX常量（通常4096）
+    #ifndef PATH_MAX
+    #define PATH_MAX 4096
+    #endif
+    
+    // 打开hwmon目录
+    dir = opendir("/sys/class/hwmon");
+    if (!dir) {
+        return -1;
+    }
+    
+    while ((entry = readdir(dir)) != NULL) {
+        // 跳过.和..
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        // 构建hwmon路径
+        if (snprintf(hwmon_path, sizeof(hwmon_path), 
+                    "/sys/class/hwmon/%s", entry->d_name) >= (int)sizeof(hwmon_path)) {
+            // 路径过长，跳过这个设备
+            continue;
+        }
+        
+        // 安全构建name路径
+        if (safe_path_join(name_path, sizeof(name_path), hwmon_path, "name") < 0) {
+            continue;
+        }
+        
+        FILE *name_file = fopen(name_path, "r");
+        if (name_file) {
+            char sensor_name[64];
+            if (fgets(sensor_name, sizeof(sensor_name), name_file)) {
+                // 去除换行符
+                sensor_name[strcspn(sensor_name, "\n")] = 0;
+                
+                // 检查是否是CPU温度传感器
+                if (strstr(sensor_name, "coretemp") || 
+                    strstr(sensor_name, "k10temp") ||
+                    strstr(sensor_name, "cpu") ||
+                    strstr(sensor_name, "Core")) {
+                    
+                    // 查找温度文件
+                    DIR *temp_dir = opendir(hwmon_path);
+                    if (temp_dir) {
+                        struct dirent *temp_entry;
+                        while ((temp_entry = readdir(temp_dir)) != NULL) {
+                            // 查找temp*_input文件
+                            if (strstr(temp_entry->d_name, "temp") && 
+                                strstr(temp_entry->d_name, "_input")) {
+                                
+                                // 安全构建温度文件路径
+                                if (safe_path_join(temp_path, sizeof(temp_path), 
+                                                  hwmon_path, temp_entry->d_name) < 0) {
+                                    continue;
+                                }
+                                
+                                temp_file = fopen(temp_path, "r");
+                                if (temp_file) {
+                                    int temp_raw;
+                                    if (fscanf(temp_file, "%d", &temp_raw) == 1) {
+                                        int temp_c = temp_raw / 1000;
+                                        if (temp_c > max_temp) {
+                                            max_temp = temp_c;
+                                        }
+                                    }
+                                    fclose(temp_file);
+                                }
+                            }
+                        }
+                        closedir(temp_dir);
+                    }
+                }
+            }
+            fclose(name_file);
+        }
+    }
+    
+    closedir(dir);
+    return max_temp;
+}
+// TrueNAS专用温度读取
+int read_temperature_for_truenas(void) {
+
+    // 方法2: 尝试TrueNAS API
+    int temp = read_temperature_via_truenas_api();
+    if (temp != -1) {
+        return temp;
+    }
+    
+    // 方法3: 尝试FreeBSD风格的路径（如果是TrueNAS CORE）
+    temp = read_temperature_freebsd_style();
+    
+    return temp;
+}
+int read_temperature_via_truenas_api(void) {
+    FILE *fp;
+    char command[256];
+    char response[1024];
+    
+    // 尝试使用midclt命令读取系统信息
+    snprintf(command, sizeof(command), 
+            "midclt call system.info 2>/dev/null | grep -i temp");
+    
+    fp = popen(command, "r");
+    if (!fp) {
+        return -1;
+    }
+    
+    if (fgets(response, sizeof(response), fp)) {
+        // 解析响应中的温度信息
+        char *temp_str = strstr(response, "temperature");
+        if (!temp_str) {
+            temp_str = strstr(response, "temp");
+        }
+        
+        if (temp_str) {
+            // 提取数字
+            for (char *p = temp_str; *p; p++) {
+                if (isdigit(*p)) {
+                    int temp = atoi(p);
+                    pclose(fp);
+                    return temp;
+                }
+            }
+        }
+    }
+    
+    pclose(fp);
     return -1;
 }
 
+// FreeBSD风格的温度读取（TrueNAS CORE）
+int read_temperature_freebsd_style(void) {
+    // 尝试FreeBSD的sysctl接口
+    FILE *fp = popen("sysctl -a 2>/dev/null | grep -i temperature", "r");
+    if (!fp) {
+        return -1;
+    }
+    
+    char line[256];
+    int max_temp = -1;
+    
+    while (fgets(line, sizeof(line), fp)) {
+        // 解析类似: dev.cpu.0.temperature: 45.0C
+        char *colon = strchr(line, ':');
+        if (colon) {
+            colon++;
+            // 查找数字
+            char *num_start = colon;
+            while (*num_start && !isdigit(*num_start)) {
+                num_start++;
+            }
+            
+            if (isdigit(*num_start)) {
+                int temp = atoi(num_start);
+                if (temp > max_temp) {
+                    max_temp = temp;
+                }
+            }
+        }
+    }
+    
+    pclose(fp);
+    
+    // 如果没找到，尝试内核温度设备
+    fp = fopen("/dev/systemperature", "r");
+    if (fp) {
+        // 读取温度...
+        fclose(fp);
+    }
+    
+    return max_temp;
+}
 // 读取CPU数据
 void read_cpu_data(CPUData *data) {
     FILE *file = fopen("/proc/stat", "r");
