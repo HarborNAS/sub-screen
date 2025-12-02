@@ -2511,7 +2511,7 @@ void systemoperation(unsigned char cmd,unsigned char time)
     switch (cmd)
     {
     case HIBERNATEATONCE_AIM:
-        command = "systemctl hibernate";
+        command = "systemctl suspend";
         break;
     
     default:
