@@ -1879,7 +1879,7 @@ int acquire_io_permissions() {
         return -1;
     }
     #if DebugToken
-    printf("EC 62/66端口权限获取成功\n");
+    printf("EC 62/66 Port Permission Get OK\n");
     #endif
     return 0;
 }
@@ -1962,7 +1962,9 @@ int ec_ram_write_byte(unsigned char address, unsigned char value) {
         return -1;
     }
     ec_write_data(value);
-    
+    #if DebugToken
+    printf("EC RAM Write OK\n");
+    #endif
     return ec_wait_ready();
 }
 
@@ -2651,45 +2653,58 @@ void get_interface_basic_info(const char *ifname, network_interface_t *iface) {
 
 // 获取IP地址信息
 void get_interface_ip_info(const char *ifname, network_interface_t *iface) {
-    int sockfd;
-    struct ifreq ifr;
-    struct sockaddr_in *addr;
+    struct ifaddrs *ifaddr, *ifa;
+    int found_ip = 0;
     
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd < 0) {
-        perror("socket");
+    // 初始化IP地址和子网掩码
+    strcpy(iface->ip_address, "0.0.0.0");
+    strcpy(iface->netmask, "0.0.0.0");
+    
+    if (getifaddrs(&ifaddr) == -1) {
+        perror("getifaddrs");
         return;
     }
     
-    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
-    
-    // 获取IP地址
-    if (ioctl(sockfd, SIOCGIFADDR, &ifr) == 0) {
-        addr = (struct sockaddr_in *)&ifr.ifr_addr;
-        const char *ip_str = inet_ntoa(addr->sin_addr);
-        if (ip_str && strcmp(ip_str, "0.0.0.0") != 0) {
-            strncpy(iface->ip_address, ip_str, sizeof(iface->ip_address) - 1);
-        } else {
-            strcpy(iface->ip_address, "0.0.0.0");
+    // 遍历所有接口
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) continue;
+        
+        // 检查接口名称是否匹配
+        if (strcmp(ifa->ifa_name, ifname) != 0) continue;
+        
+        // 只处理IPv4地址
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
+            struct sockaddr_in *netmask = (struct sockaddr_in *)ifa->ifa_netmask;
+            
+            // 获取IP地址
+            char ip_str[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &addr->sin_addr, ip_str, INET_ADDRSTRLEN)) {
+                if (strcmp(ip_str, "0.0.0.0") != 0) {
+                    strncpy(iface->ip_address, ip_str, sizeof(iface->ip_address) - 1);
+                    found_ip = 1;
+                }
+            }
+            
+            // 获取子网掩码
+            if (netmask != NULL) {
+                char mask_str[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, &netmask->sin_addr, mask_str, INET_ADDRSTRLEN)) {
+                    strncpy(iface->netmask, mask_str, sizeof(iface->netmask) - 1);
+                }
+            }
+            
+            // 找到第一个IPv4地址就退出
+            break;
         }
-    } else {
-        strcpy(iface->ip_address, "0.0.0.0");
     }
     
-    // 获取子网掩码
-    if (ioctl(sockfd, SIOCGIFNETMASK, &ifr) == 0) {
-        addr = (struct sockaddr_in *)&ifr.ifr_netmask;
-        const char *netmask_str = inet_ntoa(addr->sin_addr);
-        if (netmask_str && strcmp(netmask_str, "0.0.0.0") != 0) {
-            strncpy(iface->netmask, netmask_str, sizeof(iface->netmask) - 1);
-        } else {
-            strcpy(iface->netmask, "未分配");
-        }
-    } else {
-        strcpy(iface->netmask, "未分配");
-    }
+    freeifaddrs(ifaddr);
     
-    close(sockfd);
+    // // 如果没有找到IP，可以尝试其他方法
+    // if (!found_ip) {
+    //     get_ip_from_proc_net_dev(ifname, iface);
+    // }
 }
 
 // 获取接口速度信息
