@@ -102,27 +102,28 @@ typedef struct {
 #define MAX_IP_LENGTH 46  // IPv6地址最大长度
 // 网络接口信息结构体
 typedef struct {
-    char name[IFNAMSIZ];          // 接口名称
-    int is_physical;              // 是否是物理接口
-    char operstate[16];           // 操作状态 (up/down)
-    char ip_address[MAX_IP_LENGTH]; // IP地址
-    char mac_address[18];         // MAC地址
-    char netmask[MAX_IP_LENGTH];  // 子网掩码
-    int max_speed;                // 最大支持速度 (Mbps)
-    int current_speed;            // 当前连接速度 (Mbps)
-    char duplex[16];              // 双工模式
-    int mtu;                      // MTU值
-    unsigned long long rx_bytes;  // 接收字节数
-    unsigned long long tx_bytes;  // 发送字节数
+    char interface_name[32];
+    char ip_address[INET_ADDRSTRLEN];
+    char netmask[INET_ADDRSTRLEN];
+    char mac_address[18];
+    char status[16];
+    unsigned long long rx_bytes;
+    unsigned long long tx_bytes;
+    unsigned long long rx_bytes_prev;
+    unsigned long long tx_bytes_prev;
+    time_t last_update;
+    double rx_speed_kb;
+    double tx_speed_kb;
+    double rx_total_mb;
+    double tx_total_mb;
+    int initialized;  // 标记是否已初始化
 } network_interface_t;
+// 全局接口管理器
 typedef struct {
-    unsigned long long total_rx;  // 系统总接收字节
-    unsigned long long total_tx;  // 系统总发送字节
-    unsigned long long last_rx;   // 上一次总接收字节
-    unsigned long long last_tx;   // 上一次总发送字节
-    time_t last_time;             // 上一次更新时间
-    int first_call;               // 是否是第一次调用
-} system_traffic_t;
+    network_interface_t *interfaces;
+    int count;
+    int capacity;
+} interface_manager_t;
 static unsigned char COMMLEN = offsetof(Request, common_data.data) - offsetof(Request, length);
 void TimeSleep1Sec();
 int init_hidreport(Request *request, unsigned char cmd, unsigned char aim, unsigned char id);
@@ -171,27 +172,32 @@ void* hid_read_thread(void *arg);
 void* hid_send_thread(void* arg);
 int safe_hid_write(hid_device *handle, const unsigned char *data, int length);
 void systemoperation(unsigned char time,unsigned char cmd);
-int is_physical_interface(const char *ifname);
-void get_interface_basic_info(const char *ifname, network_interface_t *iface);
-int is_valid_mac_address(const char *mac);
-char* get_interface_mac(const char *ifname);
-void get_interface_ip_info(const char *ifname, network_interface_t *iface);
-void get_interface_speed_info(const char *ifname, network_interface_t *iface);
-void get_interface_stats(const char *ifname, network_interface_t *iface);
-int scan_network_interfaces();
-void print_interface_info(const network_interface_t *iface);
-void print_all_interfaces();
-void init_traffic(system_traffic_t *t);
-int get_system_total_traffic(system_traffic_t *t, 
-                            double *rx_speed, double *tx_speed);
-system_traffic_t traffic;
-double rx_speed, tx_speed;
-CPUData prev_data, curr_data;
+//WLAN
+static interface_manager_t g_iface_manager = {0};
+network_interface_t *ifaces;
+int init_network_monitor();
+int register_interface(const char *ifname);
+void monitor_all_interfaces();
+int register_all_physical_interfaces();
+int get_interface_basic_info(const char *ifname, 
+                           char *status, 
+                           char *mac_addr,
+                           char *ip_addr,
+                           char *netmask);
+int get_interface_traffic_info(const char *ifname,
+                             double *rx_speed_kb,
+                             double *tx_speed_kb,
+                             double *rx_total_mb,
+                             double *tx_total_mb);
+int get_registered_interfaces(char interfaces[][32], int max_interfaces);
+void cleanup_network_monitor();
+
+
+
 bool IsNvidiaGPU;
 int disk_count;
 char PageIndex = 0;
-network_interface_t wlaninterfaces[MAX_INTERFACES];
-int interface_count = 0;
+
 //1Hour Count
 int HourTimeDiv = 0;
 disk_info_t disks[MAX_DISKS];
@@ -228,7 +234,7 @@ void get_system_info(system_info_t *info);
 
 
 
-int cpusuage,cpufan,memoryusage,wlancount;
+int cpusuage,cpufan,memoryusage;
 bool Isinitial = false;
 unsigned char cputemp = 0;
 unsigned char hid_report[MAXLEN] = {0};
@@ -236,6 +242,7 @@ unsigned char ack[MAXLEN] = {0};
 system_info_t sys_info;
 Request* request = (Request *)hid_report;
 hid_device *handle;
+CPUData prev_data, curr_data;
 int main(void) {
     // 设置信号处理
     #if !IfNoPanel
@@ -268,19 +275,18 @@ int main(void) {
     #endif
     #endif
     IsNvidiaGPU = nvidia_smi_available();
-    init_traffic(&traffic);
-    get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
+
      #if DebugToken
-    printf("物理网络接口信息获取工具\n");
-    printf("=======================\n\n");
+    printf("WLAN Port=======================\n\n");
     #endif
     // 扫描所有物理网络接口
-    wlancount = scan_network_interfaces();
-    if (wlancount <= 0) {
-        printf("未发现物理网络接口\n");
-        return 1;
+    if (init_network_monitor() < 0) {
+        printf("No WLAN Port!\n");
+        return -1;
     }
-    print_all_interfaces();
+    // 注册所有物理接口
+    int registered = register_all_physical_interfaces();
+    monitor_all_interfaces();
     printf("CPUTemp:,%d\n",get_cpu_temperature());
     // 创建读取线程
     #if !IfNoPanel
@@ -292,7 +298,6 @@ int main(void) {
     }
     #endif
 
-    //get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
     #if DebugToken
     // printf("CPUTemp:%d\n",cputemp);
     // unsigned char ECcputemp = 0;
@@ -441,9 +446,9 @@ int main(void) {
     printf("-----------------------------------WLANPage initial start-----------------------------------\n");
     #endif
     int wlanpage;
-    for (int i = 0; i < wlancount; i++)
+    for (int i = 0; i < g_iface_manager.count; i++)
     {
-        wlanpage = first_init_hidreport(request, SET, WlanPage_AIM, wlancount, i + 1);
+        wlanpage = first_init_hidreport(request, SET, WlanPage_AIM, g_iface_manager.count, i + 1);
         append_crc(request);
         if (safe_hid_write(handle, hid_report, wlanpage) == -1) {
             printf("Failed to write WlanPage data\n");
@@ -659,69 +664,110 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         return offsetof(Request, user_data.crc) + 1;
     case WlanSpeed_AIM:
         request->length += sizeof(request->speed_data);
-        request->speed_data.id = 1;
-        get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
+        request->speed_data.id = id;
+        double rx_speed = 0, tx_speed = 0, rx_total = 0, tx_total = 0;
         //unit default use KB/S
-        request->speed_data.speed_info.unit = 0x11;
-        request->speed_data.speed_info.uploadspeed = tx_speed;
-        request->speed_data.speed_info.downloadspeed = rx_speed;
-        if(request->speed_data.speed_info.uploadspeed > 1024)
+        request->speed_data.speed_info.unit = 0x00;
+        network_interface_t *get_iface = &g_iface_manager.interfaces[id];
+        if(get_interface_traffic_info(get_iface->interface_name, &rx_speed, &tx_speed, &rx_total, &tx_total) == 0)
+        {
+            printf("RX Speed:  %.2f KB/s\n", rx_speed);
+            printf("TX Speed:  %.2f KB/s\n", tx_speed);
+            printf("Total RX:  %.2f MB\n", rx_total);
+            printf("Total TX:  %.2f MB\n", tx_total);
+        }
+        if(tx_speed > 1024)
         {
             request->speed_data.speed_info.unit += 0x10;
-            request->speed_data.speed_info.uploadspeed /= 1024;
-            if(request->speed_data.speed_info.uploadspeed > 1024)
+            tx_speed /= 1024;
+            if(tx_speed > 1024)
             {
                 request->speed_data.speed_info.unit += 0x10;
-                request->speed_data.speed_info.uploadspeed /= 1024;
+                tx_speed /= 1024;
+                if(tx_speed > 1024)
+                {
+                    request->speed_data.speed_info.unit += 0x10;
+                    tx_speed /= 1024;
+                }
             }
         }
-        if(request->speed_data.speed_info.downloadspeed > 1024)
+        if(rx_speed > 1024)
         {
             request->speed_data.speed_info.unit += 0x01;
-            request->speed_data.speed_info.downloadspeed /= 1024;
-            if(request->speed_data.speed_info.downloadspeed > 1024)
+            rx_speed /= 1024;
+            if(rx_speed > 1024)
             {
-                request->speed_data.speed_info.unit += 0x01;
-                request->speed_data.speed_info.downloadspeed /= 1024;
+                request->speed_data.speed_info.unit += 0x10;
+                rx_speed /= 1024;
+                if(rx_speed > 1024)
+                {
+                    request->speed_data.speed_info.unit += 0x10;
+                    rx_speed /= 1024;
+                }
             }
         }
+        
+        request->speed_data.speed_info.uploadspeed = tx_speed;
+        request->speed_data.speed_info.downloadspeed = rx_speed;
+
         return offsetof(Request, speed_data.crc) + 1;
     case WlanTotal_AIM:
         request->length += sizeof(request->flow_data);
-        request->flow_data.id = 1;
-        
-        request->flow_data.totalflow = (traffic.total_rx / 1024)  + (traffic.total_tx / 1024);
-        if(request->flow_data.totalflow > 1024)
+        request->flow_data.id = id;
+        request->flow_data.unit = 0x01;
+        //double rx_speed = 0, tx_speed = 0, rx_total = 0, tx_total = 0,total = 0;
+        double total = 0;
+        //network_interface_t 
+
+        get_iface = &g_iface_manager.interfaces[id];
+        printf("Interface: %s\n", get_iface->interface_name);
+        if(get_interface_traffic_info(get_iface->interface_name, &rx_speed, &tx_speed, &rx_total, &tx_total) == 0)
         {
-            request->flow_data.unit = 2;
-            request->flow_data.totalflow /= 1024;
+            printf("RX Speed:  %.2f KB/s\n", rx_speed);
+            printf("TX Speed:  %.2f KB/s\n", tx_speed);
+            printf("Total RX:  %.2f MB\n", rx_total);
+            printf("Total TX:  %.2f MB\n", tx_total);
         }
-        else
-            request->flow_data.unit = 1;
+        total = tx_total + rx_total;
+
+        if(total > 1024)
+        {
+            request->flow_data.unit += 0x01;
+            total /= 1024;
+            if(total > 1024)
+            {
+                request->flow_data.unit += 0x01;
+                total /= 1024;
+                if(total > 1024)
+                {
+                    request->flow_data.unit += 0x01;
+                    total /= 1024;
+                }
+            }
+        }
+        request->flow_data.totalflow = total;
         return offsetof(Request, flow_data.crc) + 1;
     case WlanIP_AIM:
         request->length += sizeof(request->wlanip_data);
         request->wlanip_data.id = id;
-        if (strcmp(wlaninterfaces[id - 1].ip_address, "未分配") != 0 && 
-        strcmp(wlaninterfaces[id - 1].ip_address, "0.0.0.0") != 0) {
-        unsigned int a, b, c, d;
-        if (sscanf(wlaninterfaces[id - 1].ip_address, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-            #if DebugToken
-            printf("IP字节分解: %d.%d.%d.%d\n", a, b, c, d);
-            printf("IP十六进制: 0x%02X.0x%02X.0x%02X.0x%02X\n", a, b, c, d);
-            #endif
-            request->wlanip_data.ip[0] = a;
-            request->wlanip_data.ip[1] = b;
-            request->wlanip_data.ip[2] = c;
-            request->wlanip_data.ip[3] = d;
-            }
-        }
-        else
+        char status[16], mac[18], ip[INET_ADDRSTRLEN], mask[INET_ADDRSTRLEN];
+        //network_interface_t 
+        get_iface = &g_iface_manager.interfaces[id];
+        printf("Interface: %s\n", get_iface->interface_name);
+        if(get_interface_basic_info(get_iface->interface_name,status, mac, ip, mask) == 0)
         {
-            request->wlanip_data.ip[0] = 0;
-            request->wlanip_data.ip[1] = 0;
-            request->wlanip_data.ip[2] = 0;
-            request->wlanip_data.ip[3] = 0;
+            printf("Status:    %s\n", status);
+            printf("MAC:       %s\n", mac);
+            printf("IP:        %s\n", ip);
+            printf("Netmask:   %s\n", mask);
+        }
+        int a,b,c,d;
+        if (sscanf(ip, "%d.%d.%d.%d", &a, &b, &c, &d) == 4) 
+        {
+            request->wlanip_data.ip[0] = (unsigned char)a;
+            request->wlanip_data.ip[1] = (unsigned char)b;
+            request->wlanip_data.ip[2] = (unsigned char)c;
+            request->wlanip_data.ip[3] = (unsigned char)d;
         }
         return offsetof(Request, wlanip_data.crc) + 1;
     default:
@@ -872,70 +918,71 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         request->WlanPage_data.count = 1;
         request->WlanPage_data.online = GetUserCount();
         request->WlanPage_data.length = (sizeof(request->WlanPage_data.wlanPage) + 1);
-        request->WlanPage_data.wlanPage.id = order;
-        request->WlanPage_data.wlanPage.unit = 0x11;
-        get_system_total_traffic(&traffic, &rx_speed, &tx_speed);
-        if(wlaninterfaces[order - 1].operstate[1] == 'p')//Up
+        request->WlanPage_data.wlanPage.id = order - 1;//order from 1 id from 0
+        request->WlanPage_data.wlanPage.unit = 0x00;
+        double rx_speed, tx_speed, rx_total, tx_total;
+        char status[16], mac[18], ip[INET_ADDRSTRLEN], mask[INET_ADDRSTRLEN];
+        
+        network_interface_t *get_iface = &g_iface_manager.interfaces[order - 1];//order from 1 id from 0
+        printf("Interface: %s\n", get_iface->interface_name);
+        if(get_interface_basic_info(get_iface->interface_name,status, mac, ip, mask) == 0)
         {
-
-            request->WlanPage_data.wlanPage.uploadspeed = tx_speed;
-            request->WlanPage_data.wlanPage.downloadspeed = rx_speed;
-            if(request->WlanPage_data.wlanPage.uploadspeed > 1024)
+            printf("Status:    %s\n", status);
+            printf("MAC:       %s\n", mac);
+            printf("IP:        %s\n", ip);
+            printf("Netmask:   %s\n", mask);
+        }
+        if(get_interface_traffic_info(get_iface->interface_name, &rx_speed, &tx_speed, &rx_total, &tx_total) == 0)
+        {
+            printf("RX Speed:  %.2f KB/s\n", rx_speed);
+            printf("TX Speed:  %.2f KB/s\n", tx_speed);
+            printf("Total RX:  %.2f MB\n", rx_total);
+            printf("Total TX:  %.2f MB\n", tx_total);
+        }
+        if(tx_speed > 1024)
+        {
+            request->WlanPage_data.wlanPage.unit += 0x10;
+            tx_speed /= 1024;
+            if(tx_speed > 1024)
             {
                 request->WlanPage_data.wlanPage.unit += 0x10;
-                request->WlanPage_data.wlanPage.uploadspeed /= 1024;
-                if(request->WlanPage_data.wlanPage.uploadspeed > 1024)
+                tx_speed /= 1024;
+                if(tx_speed > 1024)
                 {
                     request->WlanPage_data.wlanPage.unit += 0x10;
-                    request->WlanPage_data.wlanPage.uploadspeed /= 1024;
-                    
+                    tx_speed /= 1024;
                 }
             }
-            if(request->WlanPage_data.wlanPage.downloadspeed > 1024)
+        }
+        if(rx_speed > 1024)
+        {
+            request->WlanPage_data.wlanPage.unit += 0x01;
+            rx_speed /= 1024;
+            if(rx_speed > 1024)
             {
                 request->WlanPage_data.wlanPage.unit += 0x01;
-                request->WlanPage_data.wlanPage.downloadspeed /= 1024;
-                if(request->WlanPage_data.wlanPage.downloadspeed > 1024)
+                rx_speed /= 1024;
+                if(rx_speed > 1024)
                 {
                     request->WlanPage_data.wlanPage.unit += 0x01;
-                    request->WlanPage_data.wlanPage.downloadspeed /= 1024;
+                    rx_speed /= 1024;
                     
                 }
             }
         }
-        else
+        printf("TX Speed: %f,RX Speed: %f\n",tx_speed,rx_speed);
+        request->WlanPage_data.wlanPage.uploadspeed = tx_speed;
+        request->WlanPage_data.wlanPage.downloadspeed = rx_speed;
+        printf("TX Speed: %d,RX Speed: %d\n",request->WlanPage_data.wlanPage.uploadspeed,request->WlanPage_data.wlanPage.downloadspeed);
+        int a,b,c,d;
+        if (sscanf(ip, "%d.%d.%d.%d", &a, &b, &c, &d) == 4) 
         {
-            request->WlanPage_data.wlanPage.uploadspeed = 0;
-            request->WlanPage_data.wlanPage.downloadspeed = 0;
-            
+            request->WlanPage_data.wlanPage.ip[0] = (unsigned char)a;
+            request->WlanPage_data.wlanPage.ip[1] = (unsigned char)b;
+            request->WlanPage_data.wlanPage.ip[2] = (unsigned char)c;
+            request->WlanPage_data.wlanPage.ip[3] = (unsigned char)d;
         }
-        if (strcmp(wlaninterfaces[order - 1].ip_address, "未分配") != 0 && 
-        strcmp(wlaninterfaces[order - 1].ip_address, "0.0.0.0") != 0) {
-        unsigned int a, b, c, d;
-        if (sscanf(wlaninterfaces[order - 1].ip_address, "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
-            #if DebugToken
-            printf("IP字节分解: %d.%d.%d.%d\n", a, b, c, d);
-            printf("IP十六进制: 0x%02X.0x%02X.0x%02X.0x%02X\n", a, b, c, d);
-            #endif
-            request->WlanPage_data.wlanPage.ip[0] = a;
-            request->WlanPage_data.wlanPage.ip[1] = b;
-            request->WlanPage_data.wlanPage.ip[2] = c;
-            request->WlanPage_data.wlanPage.ip[3] = d;
-            }
-        }
-        else
-        {
-            request->WlanPage_data.wlanPage.ip[0] = 0;
-            request->WlanPage_data.wlanPage.ip[1] = 0;
-            request->WlanPage_data.wlanPage.ip[2] = 0;
-            request->WlanPage_data.wlanPage.ip[3] = 0;
-        }
-        //request->WlanPage_data.wlanPage.totalflow = traffic.total_rx / 1024 / 1024 + traffic.total_tx / 1024 /1024;
-
-        for (int i = 0; i < sizeof(wlaninterfaces[order].name); i++)
-        {
-            request->WlanPage_data.wlanPage.name[i] = wlaninterfaces[order - 1].name[i];
-        }
+        
         return offsetof(Request, WlanPage_data.crc) + 1;
     case InfoPage_AIM:
         request->length += sizeof(request->InfoPage_data);
@@ -2312,20 +2359,23 @@ void* hid_send_thread(void* arg) {
                 #endif
                 //WLAN IP
                 int wlansize;
-                wlansize = init_hidreport(request, SET, WlanTotal_AIM,255);
-                append_crc(request);
-                if (safe_hid_write(handle, hid_report, wlansize) == -1) {
-                    printf("Failed to write WLANTotal data\n");
-                break;
+                for (int i = 0; i < g_iface_manager.count; i++)
+                {
+                    wlansize = init_hidreport(request, SET, WlanTotal_AIM,i);
+                    append_crc(request);
+                    if (safe_hid_write(handle, hid_report, wlansize) == -1) {
+                        printf("Failed to write WLANTotal data\n");
+                    break;
+                    }
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    TimeSleep1Sec();
                 }
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                TimeSleep1Sec();
                 #if DebugToken
                 printf("-----------------------------------TotalflowSendOK-----------------------------------\n");
                 #endif
-                for (int i = 0; i < wlancount; i++)
+                for (int i = 0; i < g_iface_manager.count; i++)
                 {
-                    wlansize = init_hidreport(request, SET, WlanIP_AIM, i + 1);
+                    wlansize = init_hidreport(request, SET, WlanIP_AIM, i);
                     append_crc(request);
                     if (safe_hid_write(handle, hid_report, wlansize) == -1) {
                         printf("Failed to write WlanIP data\n");
@@ -2460,28 +2510,32 @@ void* hid_send_thread(void* arg) {
                     printf("-----------------------------------UserSendOK-----------------------------------\n");
                     #endif
                     
-                    int wlanspeedsize = init_hidreport(request, SET, WlanSpeed_AIM,255);
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, wlanspeedsize) == -1) {
-                        printf("Failed to write WLANSpeed data\n");
-                    break;
+                    int wlanspeedsize,wlantotalsize;
+                    for (int i = 0; i < g_iface_manager.count; i++)
+                    {
+                        wlanspeedsize = init_hidreport(request, SET, WlanSpeed_AIM,i);
+                        append_crc(request);
+                        if (safe_hid_write(handle, hid_report, wlanspeedsize) == -1) {
+                            printf("Failed to write WLANSpeed data\n");
+                        break;
+                        }
+                        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                        TimeSleep1Sec();
+                         wlantotalsize = init_hidreport(request, SET, WlanTotal_AIM,i);
+                        append_crc(request);
+                        if (safe_hid_write(handle, hid_report, wlantotalsize) == -1) {
+                            printf("Failed to write WLANTotal data\n");
+                        break;
+                        }
+                        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                        TimeSleep1Sec();
+                        #if DebugToken
+                        printf("-----------------------------------WLANSpeedTotalSendOK%dTime-----------------------------------\n",i);
+                        #endif
                     }
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                    TimeSleep1Sec();
+                   
                     #if DebugToken
-                    printf("-----------------------------------WLANSpeedSendOK-----------------------------------\n");
-                    #endif
-
-                    int wlantotalsize = init_hidreport(request, SET, WlanTotal_AIM,255);
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, wlantotalsize) == -1) {
-                        printf("Failed to write WLANTotal data\n");
-                    break;
-                    }
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                    TimeSleep1Sec();
-                    #if DebugToken
-                    printf("-----------------------------------WLANTotalSendOK-----------------------------------\n");
+                    printf("-----------------------------------WLANSpeedTotalSendOK-----------------------------------\n");
                     #endif
                     break;
             
@@ -2519,174 +2573,132 @@ void systemoperation(unsigned char cmd,unsigned char time)
     }
     system(command);
 }
-// 检查是否是物理接口
-int is_physical_interface(const char *ifname) {
-    char path[256];
+// 从/proc/net/dev获取网络流量统计
+static int get_interface_stats_raw(const char *ifname, unsigned long long *rx_bytes, unsigned long long *tx_bytes) {
+    FILE *fp;
+    char line[512];
+    char iface[32];
     
-    // 检查是否存在device目录（物理接口的特征）
-    snprintf(path, sizeof(path), "/sys/class/net/%s/device", ifname);
-    if (access(path, F_OK) == 0) {
-        return 1;
+    fp = fopen("/proc/net/dev", "r");
+    if (fp == NULL) {
+        printf("ERROR Failed to open /proc/net/dev: %s\n", strerror(errno));
+        return -1;
     }
     
-    // 排除常见的虚拟接口
-    if (strncmp(ifname, "lo", 2) == 0 ||      // 回环接口
-        strncmp(ifname, "virbr", 5) == 0 ||   // 虚拟网桥
-        strncmp(ifname, "vnet", 4) == 0 ||    // 虚拟网络
-        strncmp(ifname, "docker", 6) == 0 ||  // Docker接口
-        strncmp(ifname, "br-", 3) == 0 ||     // 网桥
-        strncmp(ifname, "veth", 4) == 0) {    // 虚拟以太网
-        return 0;
-    }
-    // 获取MAC地址
-    char *mac = get_interface_mac(ifname);
-    if (!mac || !is_valid_mac_address(mac)) {
-        return 0;
-    }
+    // 跳过前两行标题
+    fgets(line, sizeof(line), fp);
+    fgets(line, sizeof(line), fp);
     
-    // 额外的检查：查看设备路径
-    char device_path[256];
-    snprintf(device_path, sizeof(device_path), "/sys/class/net/%s/device", ifname);
+    *rx_bytes = 0;
+    *tx_bytes = 0;
     
-    // 如果device目录不存在，可能是纯虚拟接口
-    if (access(device_path, F_OK) != 0) {
-        return 0;
-    }
-    return 1;
-}
-// 获取接口的MAC地址
-char* get_interface_mac(const char *ifname) {
-    static char mac[18];
-    char path[256];
-    FILE *file;
-    
-    snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname);
-    
-    file = fopen(path, "r");
-    if (!file) {
-        return NULL;
-    }
-    
-    if (fgets(mac, sizeof(mac), file)) {
-        // 去除换行符
-        mac[strcspn(mac, "\n")] = '\0';
-        fclose(file);
-        return mac;
-    }
-    
-    fclose(file);
-    return NULL;
-}
-// 判断MAC地址是否有效
-int is_valid_mac_address(const char *mac) {
-    if (!mac || strlen(mac) == 0 || strcmp(mac, "00:00:00:00:00:00") == 0) {
-        return 0;
-    }
-    
-    // 检查MAC地址格式
-    int colon_count = 0, dash_count = 0;
-    int hex_count = 0;
-    
-    for (int i = 0; mac[i] != '\0'; i++) {
-        if (mac[i] == ':') {
-            colon_count++;
-        } else if (mac[i] == '-') {
-            dash_count++;
-        } else if (isxdigit(mac[i])) {
-            hex_count++;
-        } else if (mac[i] != ' ' && mac[i] != '\t') {
-            // 非法字符
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        char *colon = strchr(line, ':');
+        if (colon == NULL) continue;
+        
+        // 提取接口名称
+        *colon = '\0';
+        strcpy(iface, line);
+        
+        // 移除前导空格
+        char *iface_name = iface;
+        while (*iface_name == ' ') iface_name++;
+        
+        if (strcmp(iface_name, ifname) == 0) {
+            // 解析接收和发送字节数
+            sscanf(colon + 1, "%llu %*u %*u %*u %*u %*u %*u %*u %llu",
+                   rx_bytes, tx_bytes);
+            fclose(fp);
             return 0;
         }
     }
     
-    // 标准MAC地址应该有 6组十六进制数，5个分隔符
-    if ((colon_count == 5 || dash_count == 5) && hex_count == 12) {
-        return 1;
+    fclose(fp);
+    return -1;
+}
+
+// 获取MAC地址
+static int get_interface_mac_address(const char *ifname, char *mac_addr) {
+    struct ifreq ifr;
+    int fd;
+    
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -1;
     }
     
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0) {
+        close(fd);
+        return -1;
+    }
+    
+    unsigned char *mac = (unsigned char *)ifr.ifr_hwaddr.sa_data;
+    snprintf(mac_addr, 18, "%02x:%02x:%02x:%02x:%02x:%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    
+    close(fd);
     return 0;
 }
-// 获取接口基本状态信息
-void get_interface_basic_info(const char *ifname, network_interface_t *iface) {
-    char path[256];
-    FILE *file;
-    char line[256];
+
+// 获取接口状态
+static int get_interface_status(const char *ifname, char *status) {
+    struct ifreq ifr;
+    int fd;
     
-    strncpy(iface->name, ifname, IFNAMSIZ - 1);
-    iface->is_physical = is_physical_interface(ifname);
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
     
-    // 获取操作状态
-    snprintf(path, sizeof(path), "/sys/class/net/%s/operstate", ifname);
-    file = fopen(path, "r");
-    if (file) {
-        if (fgets(line, sizeof(line), file)) {
-            line[strcspn(line, "\n")] = 0;
-            strncpy(iface->operstate, line, sizeof(iface->operstate) - 1);
-        }
-        fclose(file);
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    
+    if (ioctl(fd, SIOCGIFFLAGS, &ifr) < 0) {
+        close(fd);
+        return -1;
+    }
+    
+    if (ifr.ifr_flags & IFF_UP) {
+        strcpy(status, "UP");
     } else {
-        strcpy(iface->operstate, "unknown");
+        strcpy(status, "DOWN");
     }
     
-    // 获取MTU
-    snprintf(path, sizeof(path), "/sys/class/net/%s/mtu", ifname);
-    file = fopen(path, "r");
-    if (file) {
-        if (fgets(line, sizeof(line), file)) {
-            iface->mtu = atoi(line);
-        }
-        fclose(file);
+    if (ifr.ifr_flags & IFF_RUNNING) {
+        strcat(status, " (RUNNING)");
     }
     
-    // 获取MAC地址
-    snprintf(path, sizeof(path), "/sys/class/net/%s/address", ifname);
-    file = fopen(path, "r");
-    if (file) {
-        if (fgets(line, sizeof(line), file)) {
-            line[strcspn(line, "\n")] = 0;
-            strncpy(iface->mac_address, line, sizeof(iface->mac_address) - 1);
-        }
-        fclose(file);
-    }
+    close(fd);
+    return 0;
 }
 
 // 获取IP地址信息
-void get_interface_ip_info(const char *ifname, network_interface_t *iface) {
+static void get_interface_ip_info(const char *ifname, network_interface_t *iface) {
     struct ifaddrs *ifaddr, *ifa;
-    int found_ip = 0;
     
-    // 初始化IP地址和子网掩码
     strcpy(iface->ip_address, "0.0.0.0");
     strcpy(iface->netmask, "0.0.0.0");
     
     if (getifaddrs(&ifaddr) == -1) {
-        perror("getifaddrs");
         return;
     }
     
-    // 遍历所有接口
     for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
         if (ifa->ifa_addr == NULL) continue;
-        
-        // 检查接口名称是否匹配
         if (strcmp(ifa->ifa_name, ifname) != 0) continue;
         
-        // 只处理IPv4地址
         if (ifa->ifa_addr->sa_family == AF_INET) {
             struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
             struct sockaddr_in *netmask = (struct sockaddr_in *)ifa->ifa_netmask;
             
-            // 获取IP地址
             char ip_str[INET_ADDRSTRLEN];
             if (inet_ntop(AF_INET, &addr->sin_addr, ip_str, INET_ADDRSTRLEN)) {
                 if (strcmp(ip_str, "0.0.0.0") != 0) {
                     strncpy(iface->ip_address, ip_str, sizeof(iface->ip_address) - 1);
-                    found_ip = 1;
                 }
             }
             
-            // 获取子网掩码
             if (netmask != NULL) {
                 char mask_str[INET_ADDRSTRLEN];
                 if (inet_ntop(AF_INET, &netmask->sin_addr, mask_str, INET_ADDRSTRLEN)) {
@@ -2694,257 +2706,317 @@ void get_interface_ip_info(const char *ifname, network_interface_t *iface) {
                 }
             }
             
-            // 找到第一个IPv4地址就退出
             break;
         }
     }
     
     freeifaddrs(ifaddr);
-    
-    // // 如果没有找到IP，可以尝试其他方法
-    // if (!found_ip) {
-    //     get_ip_from_proc_net_dev(ifname, iface);
-    // }
 }
 
-// 获取接口速度信息
-void get_interface_speed_info(const char *ifname, network_interface_t *iface) {
-    char path[256];
-    FILE *file;
-    char line[256];
-    int sockfd;
-    struct ifreq ifr;
-    struct ethtool_cmd edata;
-    
-    // 初始化默认值
-    iface->max_speed = -1;
-    iface->current_speed = -1;
-    strcpy(iface->duplex, "未知");
-    
-    // 从sysfs获取最大速度
-    snprintf(path, sizeof(path), "/sys/class/net/%s/speed", ifname);
-    file = fopen(path, "r");
-    if (file) {
-        if (fgets(line, sizeof(line), file)) {
-            iface->max_speed = atoi(line);
-        }
-        fclose(file);
-    }
-    
-    // 使用ethtool获取当前速度和双工模式
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sockfd >= 0) {
-        strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
-        edata.cmd = ETHTOOL_GSET;
-        ifr.ifr_data = (caddr_t)&edata;
-        
-        if (ioctl(sockfd, SIOCETHTOOL, &ifr) == 0) {
-            int speed = ethtool_cmd_speed(&edata);
-            if (speed != 0 && speed != 65535) {
-                iface->current_speed = speed;
-            }
-            
-            if (edata.duplex == DUPLEX_FULL) {
-                strcpy(iface->duplex, "全双工");
-            } else if (edata.duplex == DUPLEX_HALF) {
-                strcpy(iface->duplex, "半双工");
-            }
-        }
-        close(sockfd);
-    }
-    
-    // 如果无法获取当前速度，使用最大速度作为当前速度
-    if (iface->current_speed == -1 && iface->max_speed > 0) {
-        iface->current_speed = iface->max_speed;
-    }
-}
-
-// 获取网络统计信息
-void get_interface_stats(const char *ifname, network_interface_t *iface) {
-    FILE *file;
-    char line[512];
-    char dev_name[32];
-    
-    file = fopen("/proc/net/dev", "r");
-    if (!file) {
-        return;
-    }
-    
-    // 跳过前两行标题
-    fgets(line, sizeof(line), file);
-    fgets(line, sizeof(line), file);
-    
-    while (fgets(line, sizeof(line), file)) {
-        if (sscanf(line, " %[^:]: %llu %*u %*u %*u %*u %*u %*u %*u %llu",
-                   dev_name, &iface->rx_bytes, &iface->tx_bytes) == 3) {
-            if (strcmp(dev_name, ifname) == 0) {
-                break;
-            }
-        }
-    }
-    
-    fclose(file);
-}
-
-
-// 扫描所有网络接口
-int scan_network_interfaces() {
-    DIR *dir;
-    struct dirent *entry;
-    
-    dir = opendir("/sys/class/net");
-    if (!dir) {
-        perror("无法访问 /sys/class/net");
-        return -1;
-    }
-    
-    interface_count = 0;
-    
-    while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.' || interface_count >= MAX_INTERFACES) {
-            continue;
-        }
-        
-        // 只处理物理接口
-        if (!is_physical_interface(entry->d_name)) {
-            continue;
-        }
-        
-        network_interface_t *iface = &wlaninterfaces[interface_count];
-        
-        // 获取各种信息
-        get_interface_basic_info(entry->d_name, iface);
-        get_interface_ip_info(entry->d_name, iface);
-        get_interface_speed_info(entry->d_name, iface);
-        get_interface_stats(entry->d_name, iface);
-        
-        interface_count++;
-    }
-    
-    closedir(dir);
-    return interface_count;
-}
-
-// 打印接口信息
-void print_interface_info(const network_interface_t *iface) {
-    printf("接口名称: %s\n", iface->name);
-    printf("  物理接口: %s\n", iface->is_physical ? "是" : "否");
-    printf("  操作状态: %s\n", iface->operstate);
-    printf("  IP地址: %s\n", iface->ip_address);
-    printf("  子网掩码: %s\n", iface->netmask);
-    printf("  MAC地址: %s\n", iface->mac_address);
-    printf("  最大速度: %d Mbps\n", iface->max_speed);
-    printf("  当前速度: %d Mbps\n", iface->current_speed);
-    printf("  双工模式: %s\n", iface->duplex);
-    printf("  MTU: %d\n", iface->mtu);
-    printf("  接收字节: %llu\n", iface->rx_bytes);
-    printf("  发送字节: %llu\n", iface->tx_bytes);
-    printf("  %s\n", "─");
-}
-
-// 打印所有接口信息
-void print_all_interfaces() {
-    printf("=== 物理网络接口信息 ===\n");
-    printf("发现 %d 个物理接口:\n\n", interface_count);
-    
-    for (int i = 0; i < interface_count; i++) {
-        printf("%d. ", i + 1);
-        print_interface_info(&wlaninterfaces[i]);
-        printf("\n");
-    }
-}
-
-// 按名称查找接口
-network_interface_t* find_interface_by_name(const char *name) {
-    for (int i = 0; i < interface_count; i++) {
-        if (strcmp(wlaninterfaces[i].name, name) == 0) {
-            return &wlaninterfaces[i];
+// 在管理器中查找接口
+static network_interface_t* find_interface(const char *ifname) {
+    for (int i = 0; i < g_iface_manager.count; i++) {
+        if (strcmp(g_iface_manager.interfaces[i].interface_name, ifname) == 0) {
+            return &g_iface_manager.interfaces[i];
         }
     }
     return NULL;
 }
 
-// 获取特定接口的详细信息
-void get_specific_interface_info(const char *ifname) {
-    network_interface_t iface;
+
+// 初始化网络监控系统
+int init_network_monitor() {
+    printf("INFO Initializing network monitor\n");
     
-    if (!is_physical_interface(ifname)) {
-        printf("%s 不是物理接口或不存在\n", ifname);
-        return;
+    // 初始分配8个接口的空间
+    g_iface_manager.capacity = 8;
+    g_iface_manager.interfaces = (network_interface_t*)malloc(
+        g_iface_manager.capacity * sizeof(network_interface_t));
+    
+    if (g_iface_manager.interfaces == NULL) {
+        printf("ERROR Failed to allocate memory for interfaces\n");
+        return -1;
     }
     
-    get_interface_basic_info(ifname, &iface);
-    get_interface_ip_info(ifname, &iface);
-    get_interface_speed_info(ifname, &iface);
-    get_interface_stats(ifname, &iface);
-    
-    printf("=== %s 详细信息 ===\n", ifname);
-    print_interface_info(&iface);
-}
-// 流量获取
-
-
-void init_traffic(system_traffic_t *t) {
-    memset(t, 0, sizeof(system_traffic_t));
-    t->first_call = 1;
+    g_iface_manager.count = 0;
+    printf("INFO Network monitor initialized successfully\n");
+    return 0;
 }
 
-// 获取系统所有物理接口的总流量
-int get_system_total_traffic(system_traffic_t *t, 
-                            double *rx_speed, double *tx_speed) {
-    FILE *fp = fopen("/proc/net/dev", "r");
-    if (!fp) return -1;
+// 注册一个接口到监控系统
+int register_interface(const char *ifname) {
+    // 检查接口是否已注册
+    if (find_interface(ifname) != NULL) {
+        printf("WARNING Interface %s is already registered\n", ifname);
+        return 0; // 已存在，不算错误
+    }
     
-    char line[256];
-    char ifname[32];
-    unsigned long long rx, tx;
-    unsigned long long current_rx = 0, current_tx = 0;
+    // 检查是否需要扩容
+    if (g_iface_manager.count >= g_iface_manager.capacity) {
+        int new_capacity = g_iface_manager.capacity * 2;
+        network_interface_t *new_interfaces = (network_interface_t*)realloc(
+            g_iface_manager.interfaces, new_capacity * sizeof(network_interface_t));
+        
+        if (new_interfaces == NULL) {
+            printf("ERROR Failed to expand interface array\n");
+            return -1;
+        }
+        
+        g_iface_manager.interfaces = new_interfaces;
+        g_iface_manager.capacity = new_capacity;
+    }
     
-    // 跳过标题行
-    fgets(line, sizeof(line), fp);
-    fgets(line, sizeof(line), fp);
+    // 初始化新接口
+    network_interface_t *iface = &g_iface_manager.interfaces[g_iface_manager.count];
+    memset(iface, 0, sizeof(network_interface_t));
+    strncpy(iface->interface_name, ifname, sizeof(iface->interface_name) - 1);
     
-    // 汇总所有物理接口的流量（排除虚拟接口）
-    while (fgets(line, sizeof(line), fp)) {
-        if (sscanf(line, " %[^:]: %llu %*u %*u %*u %*u %*u %*u %*u %llu", 
-                   ifname, &rx, &tx) == 3) {
-            // 排除虚拟接口
-            if (strncmp(ifname, "lo", 2) != 0 &&
-                strncmp(ifname, "virbr", 5) != 0 &&
-                strncmp(ifname, "docker", 6) != 0 &&
-                strncmp(ifname, "br-", 3) != 0 &&
-                strncmp(ifname, "veth", 4) != 0 &&
-                strncmp(ifname, "tun", 3) != 0) {
-                current_rx += rx;
-                current_tx += tx;
+    // 获取静态信息
+    if (get_interface_status(ifname, iface->status) < 0) {
+        strcpy(iface->status, "UNKNOWN");
+    }
+    
+    if (get_interface_mac_address(ifname, iface->mac_address) < 0) {
+        strcpy(iface->mac_address, "00:00:00:00:00:00");
+    }
+    
+    get_interface_ip_info(ifname, iface);
+    
+    // 获取初始流量统计
+    if (get_interface_stats_raw(ifname, &iface->rx_bytes, &iface->tx_bytes) == 0) {
+        iface->rx_bytes_prev = iface->rx_bytes;
+        iface->tx_bytes_prev = iface->tx_bytes;
+        iface->initialized = 1;
+        time(&iface->last_update);
+        
+        // 计算初始总流量
+        iface->rx_total_mb = (double)iface->rx_bytes / (1024.0 * 1024.0);
+        iface->tx_total_mb = (double)iface->tx_bytes / (1024.0 * 1024.0);
+    } else {
+        printf("WARNING Failed to get initial stats for %s\n", ifname);
+        iface->initialized = 0;
+    }
+    
+    g_iface_manager.count++;
+    printf("INFO Registered interface: %s\n", ifname);
+    
+    return 0;
+}
+
+// 注册所有物理接口
+int register_all_physical_interfaces() {
+    struct ifaddrs *ifaddr, *ifa;
+    int registered_count = 0;
+    
+    if (getifaddrs(&ifaddr) == -1) {
+        printf("ERROR getifaddrs failed: %s\n", strerror(errno));
+        return 0;
+    }
+    
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) continue;
+        
+        const char *ifname = ifa->ifa_name;
+        
+        // 过滤条件
+        if (strcmp(ifname, "lo") == 0) continue;
+        if (strstr(ifname, "docker") != NULL) continue;
+        if (strstr(ifname, "veth") != NULL) continue;
+        if (strstr(ifname, "br-") != NULL) continue;
+        if (strstr(ifname, "virbr") != NULL) continue;
+        if (strstr(ifname, "tun") != NULL) continue;
+        if (strstr(ifname, "tap") != NULL) continue;
+        
+        // 检查是否已注册
+        if (find_interface(ifname) == NULL) {
+            if (register_interface(ifname) == 0) {
+                registered_count++;
             }
         }
     }
     
-    fclose(fp);
+    freeifaddrs(ifaddr);
+    printf("INFO Registered %d physical interfaces\n", registered_count);
+    return registered_count;
+}
+
+// 获取接口基本信息
+int get_interface_basic_info(const char *ifname, 
+                           char *status, 
+                           char *mac_addr,
+                           char *ip_addr,
+                           char *netmask) {
     
-    time_t now = time(NULL);
-    t->total_rx = (current_rx / 1024);//KB
-    t->total_tx = (current_tx / 1024);//KB
-    
-    // 计算速度
-    if (!t->first_call) {
-        double secs = difftime(now, t->last_time);
-        if (secs > 0) {
-            *rx_speed = (double)(current_rx - t->last_rx) / (1024 * secs);//KB
-            *tx_speed = (double)(current_tx - t->last_tx) / (1024 * secs);//KB
-        }
-    } else {
-        *rx_speed = *tx_speed = 0;
-        t->first_call = 0;
+    network_interface_t *iface = find_interface(ifname);
+    if (iface == NULL) {
+        printf("ERROR Interface %s not found\n", ifname);
+        return -1;
     }
     
-    t->last_rx = current_rx;
-    t->last_tx = current_tx;
-    t->last_time = now;
+    if (status) strcpy(status, iface->status);
+    if (mac_addr) strcpy(mac_addr, iface->mac_address);
+    if (ip_addr) strcpy(ip_addr, iface->ip_address);
+    if (netmask) strcpy(netmask, iface->netmask);
     
     return 0;
 }
+
+// 主要API：获取接口流量信息
+int get_interface_traffic_info(const char *ifname,
+                             double *rx_speed_kb,
+                             double *tx_speed_kb,
+                             double *rx_total_mb,
+                             double *tx_total_mb) {
+    
+    network_interface_t *iface = find_interface(ifname);
+    if (iface == NULL) {
+        printf("ERROR Interface %s not registered\n", ifname);
+        return -1;
+    }
+    
+    // 获取当前流量统计
+    unsigned long long current_rx, current_tx;
+    if (get_interface_stats_raw(ifname, &current_rx, &current_tx) < 0) {
+        printf("WARNING Failed to get stats for %s\n", ifname);
+        return -1;
+    }
+    
+    time_t now;
+    time(&now);
+    
+    // 如果这是第一次获取，初始化
+    if (!iface->initialized) {
+        iface->rx_bytes = current_rx;
+        iface->tx_bytes = current_tx;
+        iface->rx_bytes_prev = current_rx;
+        iface->tx_bytes_prev = current_tx;
+        iface->last_update = now;
+        iface->initialized = 1;
+        
+        // 计算总流量
+        iface->rx_total_mb = (double)current_rx / (1024.0 * 1024.0);
+        iface->tx_total_mb = (double)current_tx / (1024.0 * 1024.0);
+        
+        // 速度初始为0
+        iface->rx_speed_kb = 0.0;
+        iface->tx_speed_kb = 0.0;
+    } else {
+        // 更新当前值
+        iface->rx_bytes = current_rx;
+        iface->tx_bytes = current_tx;
+        
+        // 计算时间差
+        double time_diff = difftime(now, iface->last_update);
+        
+        // 计算速度（处理时间差过小的情况）
+        if (time_diff > 0.1) {  // 至少0.1秒才有意义
+            // 检查计数器是否重置
+            unsigned long long rx_diff = (current_rx >= iface->rx_bytes_prev) ? 
+                                        (current_rx - iface->rx_bytes_prev) : current_rx;
+            unsigned long long tx_diff = (current_tx >= iface->tx_bytes_prev) ? 
+                                        (current_tx - iface->tx_bytes_prev) : current_tx;
+            
+            // 计算速度（KB/s）
+            iface->rx_speed_kb = (double)rx_diff / time_diff / 1024.0;
+            iface->tx_speed_kb = (double)tx_diff / time_diff / 1024.0;
+            
+            // 更新previous值
+            iface->rx_bytes_prev = current_rx;
+            iface->tx_bytes_prev = current_tx;
+        }
+        // 如果时间差太小，保持之前的速度值
+        
+        // 更新最后更新时间
+        iface->last_update = now;
+        
+        // 更新总流量
+        iface->rx_total_mb = (double)current_rx / (1024.0 * 1024.0);
+        iface->tx_total_mb = (double)current_tx / (1024.0 * 1024.0);
+    }
+    
+    // 返回结果
+    if (rx_speed_kb) *rx_speed_kb = iface->rx_speed_kb;
+    if (tx_speed_kb) *tx_speed_kb = iface->tx_speed_kb;
+    if (rx_total_mb) *rx_total_mb = iface->rx_total_mb;
+    if (tx_total_mb) *tx_total_mb = iface->tx_total_mb;
+    
+    return 0;
+}
+
+// 获取所有已注册的接口名称
+int get_registered_interfaces(char interfaces[][32], int max_interfaces) {
+    int count = 0;
+    
+    for (int i = 0; i < g_iface_manager.count && count < max_interfaces; i++) {
+        strncpy(interfaces[count], g_iface_manager.interfaces[i].interface_name, 31);
+        interfaces[count][31] = '\0';
+        count++;
+    }
+    
+    return count;
+}
+
+// 清理资源
+void cleanup_network_monitor() {
+    if (g_iface_manager.interfaces != NULL) {
+        free(g_iface_manager.interfaces);
+        g_iface_manager.interfaces = NULL;
+    }
+    g_iface_manager.count = 0;
+    g_iface_manager.capacity = 0;
+    printf("INFO Network monitor cleaned up\n");
+}
+
+// ========== 工具函数 ==========
+
+// 显示接口完整信息
+void display_interface_info(const char *ifname) {
+    char status[16], mac[18], ip[INET_ADDRSTRLEN], mask[INET_ADDRSTRLEN];
+    double rx_speed = 0, tx_speed = 0, rx_total = 0, tx_total = 0;
+    
+    printf("\n=== Network Interface: %s ===\n", ifname);
+    
+    // 获取基本信息
+    if (get_interface_basic_info(ifname, status, mac, ip, mask) == 0) {
+        printf("Status:    %s\n", status);
+        printf("MAC:       %s\n", mac);
+        printf("IP:        %s\n", ip);
+        printf("Netmask:   %s\n", mask);
+    }
+    
+    // 获取流量信息
+    if (get_interface_traffic_info(ifname, &rx_speed, &tx_speed, &rx_total, &tx_total) == 0) {
+        printf("RX Speed:  %.2f KB/s\n", rx_speed);
+        printf("TX Speed:  %.2f KB/s\n", tx_speed);
+        printf("Total RX:  %.2f MB\n", rx_total);
+        printf("Total TX:  %.2f MB\n", tx_total);
+    }
+    
+    printf("===============================\n");
+}
+
+// 获取系统所有物理接口的总流量
+
+// 获取接口流量
+void monitor_interface_periodically(const char *ifname) {
+    double rx_speed, tx_speed, rx_total, tx_total;
+    
+    if (get_interface_traffic_info(ifname, &rx_speed, &tx_speed, &rx_total, &tx_total) == 0) {
+        printf("INFO %s - RX: %.2f KB/s, TX: %.2f KB/s, Total: RX=%.2f MB, TX=%.2f MB\n",
+                   ifname, rx_speed, tx_speed, rx_total, tx_total);
+    }
+}
+
+// 获取所有接口的流量信息
+void monitor_all_interfaces() {
+    char interfaces[10][32];
+    int count = get_registered_interfaces(interfaces, 10);
+    
+    for (int i = 0; i < count; i++) {
+        monitor_interface_periodically(interfaces[i]);
+    }
+}
+
 void get_system_info(system_info_t *info) {
     // 设备名称（主机名）
     gethostname(info->devicename, sizeof(info->devicename));
