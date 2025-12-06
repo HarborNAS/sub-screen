@@ -714,7 +714,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
     case WlanTotal_AIM:
         request->length += sizeof(request->flow_data);
         request->flow_data.id = id;
-        request->flow_data.unit = 0x01;
+        request->flow_data.unit = 0x00;
         //double rx_speed = 0, tx_speed = 0, rx_total = 0, tx_total = 0,total = 0;
         double total = 0;
         //network_interface_t 
@@ -2847,16 +2847,30 @@ int get_interface_basic_info(const char *ifname,
                            char *ip_addr,
                            char *netmask) {
     
-    network_interface_t *iface = find_interface(ifname);
-    if (iface == NULL) {
-        printf("ERROR Interface %s not found\n", ifname);
-        return -1;
+    // 不再从缓存中查找，直接实时获取
+    if (status) {
+        if (get_interface_status(ifname, status) < 0) {
+            strcpy(status, "UNKNOWN");
+        }
     }
     
-    if (status) strcpy(status, iface->status);
-    if (mac_addr) strcpy(mac_addr, iface->mac_address);
-    if (ip_addr) strcpy(ip_addr, iface->ip_address);
-    if (netmask) strcpy(netmask, iface->netmask);
+    if (mac_addr) {
+        if (get_interface_mac_address(ifname, mac_addr) < 0) {
+            strcpy(mac_addr, "00:00:00:00:00:00");
+        }
+    }
+    
+    if (ip_addr || netmask) {
+        // 临时结构体存储IP信息
+        network_interface_t temp_iface;
+        memset(&temp_iface, 0, sizeof(temp_iface));
+        strncpy(temp_iface.interface_name, ifname, sizeof(temp_iface.interface_name) - 1);
+        
+        get_interface_ip_info(ifname, &temp_iface);
+        
+        if (ip_addr) strcpy(ip_addr, temp_iface.ip_address);
+        if (netmask) strcpy(netmask, temp_iface.netmask);
+    }
     
     return 0;
 }
