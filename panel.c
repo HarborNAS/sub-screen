@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <stdint.h>
+#include <regex.h>
 //异步HID通信
 #include <pthread.h>
 #include <signal.h>
@@ -53,7 +54,6 @@
 #define DURATION 1
 #define MAX_PATH 256
 #define MAX_LINE 512
-#define MAX_DISKS 16
 // ITE
 #define ITE_EC_DATA_PORT    0x62
 #define ITE_EC_INDEX_PORT   0x66
@@ -74,18 +74,6 @@ typedef struct {
     unsigned long irq;
     unsigned long softirq;
 } CPUData;
-typedef struct {
-    char device[32];           // 设备名 (sda, nvme0n1等)
-    char model[128];           // 硬盘型号
-    char serial[64];           // 序列号
-    char mountpoint[MAX_PATH]; // 挂载点
-    unsigned long long total_size;    // 总容量 (bytes)
-    unsigned long long free_size;     // 可用容量 (bytes)
-    unsigned long long used_size;     // 已用容量 (bytes)
-    double usage_percent;      // 使用百分比
-    int temperature;           // 温度 (°C)
-    char type[16];             // 硬盘类型 (SATA/NVMe)
-} disk_info_t;
 
 typedef struct {
     char name[128];
@@ -130,28 +118,68 @@ int init_hidreport(Request *request, unsigned char cmd, unsigned char aim, unsig
 int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char total,unsigned char order);
 void append_crc(Request *request);
 unsigned char cal_crc(unsigned char * data, int len);
-int is_truenas_system(void);
 int get_cpu_temperature();
 int read_temperature_from_hwmon(void);
 int read_temperature_for_truenas(void);
 int read_temperature_via_truenas_api(void);
-int read_temperature_freebsd_style(void);
 void read_cpu_data(CPUData *data);
 float calculate_cpu_usage(const CPUData *prev, const CPUData *curr);
 int get_igpu_temperature();
 float get_igpu_usage();
 unsigned int get_memory_usage();
 int GetUserCount();
+
 int file_exists(const char *filename);
 int read_file(const char *filename, char *buffer, size_t buffer_size);
-int get_disk_temperature(const char *device);
-void get_disk_identity(const char *device, char *model, char *serial);
-unsigned long long get_disk_size(const char *device);
-void get_mountpoint(const char *device, char *mountpoint);
-int get_mountpoint_usage_statvfs(const char *mountpoint, unsigned long long *total, 
-                        unsigned long long *free, unsigned long long *used);
-int scan_disk_devices(disk_info_t *disks, int max_disks);
+//Disk
+typedef struct {
+    char name[256];           /* ZVOL名称 */
+    char full_path[512];      /* 完整ZFS路径 */
+    char parent_pool[256];    /* 父存储池 */
+    double total_gb;          /* 总容量 (GB) */
+    double written_gb;        /* 已写入数据 (GB) */
+    double usage_percent;     /* 使用率 (%) */
+    char disk_uuids[2048];    /* 磁盘UUID列表 */
+    char create_time[64];     /* 创建时间 */
+    char temperature;
+} ZvolInfo;
 
+/* 存储池信息结构体 */
+typedef struct {
+    char name[256];           /* 存储池名称 */
+    char guid[64];            /* 存储池GUID */
+    char disk_uuids[2048];    /* 磁盘UUID列表 */
+    int zvol_count;           /* ZVOL数量 */
+    ZvolInfo zvols[50];       /* ZVOL数组 */
+} PoolInfo;
+typedef struct {
+    int total_zvols;          // ZVOL总数
+    ZvolInfo* all_zvols;      // 指向所有ZVOL的指针
+} AllZvols;
+void trim_newline(char* str);
+void trim_whitespace(char* str);
+unsigned long long parse_size_with_unit(const char* size_str);
+double bytes_to_gb(unsigned long long bytes);
+double calculate_percentage(unsigned long long part, unsigned long long total);
+int execute_command(const char* cmd, char* buffer, size_t buffer_size);
+void safe_strncpy(char* dest, const char* src, size_t dest_size);
+char* my_strtok_r(char* str, const char* delim, char** saveptr);
+
+/* 主要功能函数 */
+int get_non_system_pools(PoolInfo* pools, int max_pools);
+void get_pool_disk_uuids(const char* pool_name, char* disk_uuids, size_t buffer_size);
+int get_zvols_for_pool(const char* pool_name, const char* disk_uuids, ZvolInfo* zvols, int max_zvols);
+void get_zvol_written_data(const char* zvol_path, unsigned long long* written_bytes);
+void get_zvol_creation_time(const char* zvol_path, char* create_time, size_t buffer_size);
+char* extract_disk_name(const char *device_path);
+void display_results(PoolInfo* pools, int pool_count);
+char* find_device_by_partuuid(const char *partuuid);
+int get_disk_temperature(const char *device);
+AllZvols* merge_all_zvols();
+PoolInfo pools[20];           /* 存储池数组 */
+int pool_count = 0;           /* 存储池数量 */
+int total_zvols = 0;          /* 总ZVOL数量 */
+AllZvols* all_zvols;
 
 //EC6266
 int acquire_io_permissions();
@@ -176,6 +204,7 @@ void systemoperation(unsigned char time,unsigned char cmd);
 static interface_manager_t g_iface_manager = {0};
 network_interface_t *ifaces;
 int init_network_monitor();
+void display_interface_info(const char *ifname);
 int register_interface(const char *ifname);
 void monitor_all_interfaces();
 int register_all_physical_interfaces();
@@ -200,7 +229,6 @@ char PageIndex = 0;
 
 //1Hour Count
 int HourTimeDiv = 0;
-disk_info_t disks[MAX_DISKS];
 static volatile bool running = true;
 static pthread_t read_thread,send_thread;
 static pthread_mutex_t hid_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -243,6 +271,7 @@ system_info_t sys_info;
 Request* request = (Request *)hid_report;
 hid_device *handle;
 CPUData prev_data, curr_data;
+
 int main(void) {
     // 设置信号处理
     #if !IfNoPanel
@@ -275,8 +304,7 @@ int main(void) {
     #endif
     #endif
     IsNvidiaGPU = nvidia_smi_available();
-
-     #if DebugToken
+    #if DebugToken
     printf("WLAN Port=======================\n\n");
     #endif
     // 扫描所有物理网络接口
@@ -310,30 +338,70 @@ int main(void) {
     // // 释放 I/O 权限
     // release_io_permissions();
     #endif
-    // 扫描硬盘设备
-    disk_count = scan_disk_devices(disks, MAX_DISKS);
-    if (disk_count <= 0) {
-        printf("未找到硬盘设备\n");
-        return 1;
+    // 扫描硬盘设备 
+    pool_count = get_non_system_pools(pools, 20);
+        
+    if (pool_count == 0) {
+        printf("No non-system ZFS pools found.\n");
+    } else {
+        printf("Found %d non-system pool(s):\n", pool_count);
+        for (int i = 0; i < pool_count; i++) {
+            printf("  %d. %s\n", i+1, pools[i].name);
+        }
+        printf("\n");
+        
+        /* 处理每个存储池 */
+        int total_zvols = 0;
+        for (int i = 0; i < pool_count; i++) {
+            printf("Processing pool: %s\n", pools[i].name);
+            
+            /* 获取存储池的磁盘UUID */
+            get_pool_disk_uuids(pools[i].name, pools[i].disk_uuids, sizeof(pools[i].disk_uuids));
+            
+            /* 获取存储池的ZVOL */
+            pools[i].zvol_count = get_zvols_for_pool(pools[i].name, 
+                                                    pools[i].disk_uuids, 
+                                                    pools[i].zvols, 
+                                                    50);
+            
+            total_zvols += pools[i].zvol_count;
+            printf("  Found %d ZVOL(s) in pool %s\n", pools[i].zvol_count, pools[i].name);
+        }
+        
+        /* 显示结果 */
+        display_results(pools, pool_count);
     }
-    else
-    {
-        #if DebugToken
-        printf("Diskcount:%d\n",disk_count);
-        #endif
-    }
-    #if SensorLog
-    for (int i = 0; i < disk_count; i++) {
-        //if (disks[i].temperature != -1) {
-            printf("%s:\n",disks[i].device);
-            printf("Temp:%d°C\n", disks[i].temperature);
-            printf("Totalsize:%lld\n", disks[i].total_size);
-            printf("Usedsize:%lld\n", disks[i].used_size);
-            printf("UsedPercent:%f\n", disks[i].usage_percent);
-        //}
-    }
-    #endif
+    //Merge Zvol
+    all_zvols = merge_all_zvols();
+    disk_count = all_zvols->total_zvols;
+    printf("User Count :%d\n",GetUserCount());
+    // 显示所有存储池信息
+        // if (volume_count == 0) {
+        //     printf("No non-system ZFS volumes found.\n");
+        // } else {
+        //     printf("Found %d ZFS volumes:\n", volume_count);
+        //     printf("===============================================================\n");
+            
+        //     /* 显示结果 */
+        //     for (int i = 0; i < volume_count; i++) {
+        //         printf("Volume %d:\n", i + 1);
+        //         printf("  Name: %s\n", volumes[i].vol_name);
+        //         printf("  Full Path: %s\n", volumes[i].full_name);
+        //         printf("  Parent Pool: %s\n", volumes[i].parent_pool);
+        //         printf("  Total Capacity: %.2f GB\n", volumes[i].total_gb);
+        //         printf("  Used Capacity: %.2f GB\n", volumes[i].used_gb);
+        //         printf("  Available: %.2f GB\n", volumes[i].avail_gb);
+        //         printf("  Disk IDs: %s\n", volumes[i].disk_ids);
+        //         printf("  Disk UUIDs: %s\n", volumes[i].disk_uuids);
+        //         printf("  ------------------------------------------\n");
+        //     }
+        // }
+   
+    network_interface_t *get_iface = &g_iface_manager.interfaces[0];//order from 1 id from 0
+    display_interface_info(get_iface->interface_name);
     
+    get_iface = &g_iface_manager.interfaces[1];//order from 1 id from 0
+    display_interface_info(get_iface->interface_name);
     //HomePage
     #if DebugToken
     printf("-----------------------------------HomePage initial start-----------------------------------\n");
@@ -376,19 +444,27 @@ int main(void) {
     #if DebugToken
     printf("-----------------------------------DiskPage initial start-----------------------------------\n");
     #endif
-    int diskforcount,diskpage;
+
+    int diskforcount;
+    
     if(disk_count % 2 == 0)
         diskforcount = disk_count / 2;
     else
         diskforcount = disk_count / 2 + 1;
-    for (int i = 0; i < diskforcount; i++)
-    {
+    int diskpage;
+    for (int i = 0; i < diskforcount; i++) {
         diskpage = first_init_hidreport(request, SET, DiskPage_AIM, diskforcount, (i + 1));
         append_crc(request);
         if (safe_hid_write(handle, hid_report, diskpage) == -1) {
-            printf("Failed to write DiskPage data\n");
-            break;
+           printf("Failed to write DiskPage data\n");
+           break;
         }
+        ZvolInfo* zvol = &all_zvols->all_zvols[i];
+        printf("%-30s %-20s %-10.2f %-10.2f\n",
+               zvol->name,
+               zvol->parent_pool,
+               zvol->total_gb,
+               zvol->usage_percent);
         #if DebugToken
         // printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
         // printf("Diskpage Head: %x\n",request->header);
@@ -422,7 +498,6 @@ int main(void) {
         #endif
         sleep(3);
         memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-        
     }
     #if DebugToken
     printf("-----------------------------------DiskPage initial end-----------------------------------\n");
@@ -460,12 +535,7 @@ int main(void) {
     #if DebugToken
     printf("-----------------------------------WLANPage initial end-----------------------------------\n");
     #endif
-
     get_system_info(&sys_info);
-    printf("Device Name:%s\n",sys_info.devicename);
-    printf("CPU Name:%s\n",sys_info.cpuname);
-    printf("OS Name:%s\n",sys_info.operatename);
-    printf("SN:%s\n",sys_info.serial_number);
     #if DebugToken
     printf("-----------------------------------InfoPage initial start-----------------------------------\n");
     #endif
@@ -620,9 +690,10 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         request->length += sizeof(request->disk_data);
         request->disk_data.disk_info.disk_id = id;
         request->disk_data.disk_info.unit = 0x33;
-        request->disk_data.disk_info.total_size = disks[id].total_size;
-        request->disk_data.disk_info.used_size = disks[id].used_size;
-        request->disk_data.disk_info.temp = disks[id].temperature;
+        ZvolInfo* zvol =&all_zvols->all_zvols[id];
+        request->disk_data.disk_info.total_size = zvol->total_gb;
+        request->disk_data.disk_info.used_size = zvol->written_gb;
+        request->disk_data.disk_info.temp = zvol->temperature;
         return offsetof(Request, disk_data.crc) + 1;
     // case GPU_AIM:
     //     request->length += sizeof(request->gpu_data);
@@ -857,52 +928,56 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         request->DiskPage_data.diskcount = disk_count;
         request->DiskPage_data.total = total;
         request->DiskPage_data.order = order;
+        ZvolInfo* zvol;
         if((disk_count - (order-1)*2) == 1)
         {
+            zvol = &all_zvols->all_zvols[(order - 1) * 2];
             request->DiskPage_data.count = 1;
             request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
             request->DiskPage_data.diskStruct[0].unit = 0x33;
             request->DiskPage_data.diskStruct[0].reserve = 0;
-            request->DiskPage_data.diskStruct[0].total_size = disks[(order - 1) * 2].total_size;
-            request->DiskPage_data.diskStruct[0].used_size = disks[(order - 1) * 2].used_size;
-            request->DiskPage_data.diskStruct[0].temp = disks[(order - 1) * 2].temperature;
+            request->DiskPage_data.diskStruct[0].total_size = zvol->total_gb;
+            request->DiskPage_data.diskStruct[0].used_size = zvol->written_gb;
+            request->DiskPage_data.diskStruct[0].temp = zvol->temperature;
             //reserve name
-            for (int i = 0; i < sizeof(disks[(order - 1) * 2].device); i++)
+            for (int i = 0; i < sizeof(zvol->name); i++)
             {
-                request->DiskPage_data.diskStruct[0].name[i] = disks[(order - 1) * 2].device[i];
+                request->DiskPage_data.diskStruct[0].name[i] = zvol->name[i];
             }
-            request->DiskPage_data.diskStruct[0].name[sizeof(disks[(order - 1) * 2].device) + 1] = 0;
+            request->DiskPage_data.diskStruct[0].name[sizeof(zvol->name) + 1] = 0;
             request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
         }
         else
         {
             //First
+            zvol = &all_zvols->all_zvols[(order - 1) * 2];
             request->DiskPage_data.count = 2;
             request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2;//id >= 0
             request->DiskPage_data.diskStruct[0].unit = 0x33;
             request->DiskPage_data.diskStruct[0].reserve = 0;
-            request->DiskPage_data.diskStruct[0].total_size = disks[(order - 1) * 2].total_size;
-            request->DiskPage_data.diskStruct[0].used_size = disks[(order - 1) * 2].used_size;
-            request->DiskPage_data.diskStruct[0].temp = disks[(order - 1) * 2].temperature;
-            for (int i = 0; i < sizeof(disks[(order - 1) * 2].device); i++)
+            request->DiskPage_data.diskStruct[0].total_size = zvol->total_gb;
+            request->DiskPage_data.diskStruct[0].used_size = zvol->written_gb;
+            request->DiskPage_data.diskStruct[0].temp = zvol->temperature;
+            for (int i = 0; i < sizeof(zvol->name); i++)
             {
-                request->DiskPage_data.diskStruct[0].name[i] = disks[(order - 1) * 2].device[i];
+                request->DiskPage_data.diskStruct[0].name[i] = zvol->name[i];
             }
-            request->DiskPage_data.diskStruct[0].name[sizeof(disks[(order - 1) * 2].device) + 1] = 0;
+            request->DiskPage_data.diskStruct[0].name[sizeof(zvol->name) + 1] = 0;
             request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
             //Second
+            zvol = &all_zvols->all_zvols[(order - 1) * 2 + 1];
             request->DiskPage_data.diskStruct[1].disk_id = 1 + (order - 1) * 2;
             request->DiskPage_data.diskStruct[1].unit = 0x33;
             request->DiskPage_data.diskStruct[1].reserve = 0;
-            request->DiskPage_data.diskStruct[1].total_size = disks[(order - 1) * 2 +1].total_size;
-            request->DiskPage_data.diskStruct[1].used_size = disks[(order - 1) * 2 + 1].used_size;
-            request->DiskPage_data.diskStruct[1].temp = disks[(order - 1) * 2 + 1].temperature;
-            for (int i = 0; i < sizeof(disks[(order - 1) * 2 + 1].device); i++)
+            request->DiskPage_data.diskStruct[1].total_size = zvol->total_gb;
+            request->DiskPage_data.diskStruct[1].used_size = zvol->written_gb;
+            request->DiskPage_data.diskStruct[1].temp = zvol->temperature;
+            for (int i = 0; i < sizeof(zvol->name); i++)
             {
-                request->DiskPage_data.diskStruct[1].name[i] = disks[(order - 1) * 2 + 1].device[i];
+                request->DiskPage_data.diskStruct[1].name[i] = zvol->name[i];
             }
-            request->DiskPage_data.diskStruct[1].name[sizeof(disks[(order - 1) * 2 + 1].device) + 1] = 0;
-            request->DiskPage_data.diskStruct[1].disklength = sizeof(request->DiskPage_data.diskStruct[1]);
+            request->DiskPage_data.diskStruct[1].name[sizeof(zvol->name) + 1] = 0;
+            request->DiskPage_data.diskStruct[1].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
         }
         return offsetof(Request, DiskPage_data.crc) + 1;
     case ModePage_AIM:
@@ -1105,31 +1180,7 @@ unsigned char cal_crc(unsigned char * data, int len) {
     #endif
     return (unsigned char)(crc & 0xff);
 }
-// 检查是否为TrueNAS系统
-int is_truenas_system(void) {
-    FILE *fp;
-    char line[256];
-    
-    // 方法1: 检查/etc/os-release
-    fp = fopen("/etc/os-release", "r");
-    if (fp) {
-        while (fgets(line, sizeof(line), fp)) {
-            if (strstr(line, "truenas") || strstr(line, "TrueNAS")) {
-                fclose(fp);
-                return 1;
-            }
-        }
-        fclose(fp);
-    }
-    
-    // 方法2: 检查是否存在TrueNAS特定文件
-    if (access("/usr/local/bin/midclt", F_OK) == 0 ||
-        access("/etc/network/truenas", F_OK) == 0) {
-        return 1;
-    }
-    
-    return 0;
-}
+
 int get_cpu_temperature() {
     FILE *temp_file;
     char path[512];
@@ -1159,12 +1210,12 @@ int get_cpu_temperature() {
         return temperature;
     }
     // 方法5: 如果是TrueNAS，尝试特定路径
-    if (is_truenas_system()) {
-        temperature = read_temperature_for_truenas();
-        if (temperature != -1) {
-            return temperature;
-        }
-    }
+    // if (is_truenas_system()) {
+    //     temperature = read_temperature_for_truenas();
+    //     if (temperature != -1) {
+    //         return temperature;
+    //     }
+    // }
     
     return -1;
 }
@@ -1288,99 +1339,9 @@ int read_temperature_from_hwmon(void) {
     closedir(dir);
     return max_temp;
 }
-// TrueNAS专用温度读取
-int read_temperature_for_truenas(void) {
 
-    // 方法2: 尝试TrueNAS API
-    int temp = read_temperature_via_truenas_api();
-    if (temp != -1) {
-        return temp;
-    }
-    
-    // 方法3: 尝试FreeBSD风格的路径（如果是TrueNAS CORE）
-    temp = read_temperature_freebsd_style();
-    
-    return temp;
-}
-int read_temperature_via_truenas_api(void) {
-    FILE *fp;
-    char command[256];
-    char response[1024];
-    
-    // 尝试使用midclt命令读取系统信息
-    snprintf(command, sizeof(command), 
-            "midclt call system.info 2>/dev/null | grep -i temp");
-    
-    fp = popen(command, "r");
-    if (!fp) {
-        return -1;
-    }
-    
-    if (fgets(response, sizeof(response), fp)) {
-        // 解析响应中的温度信息
-        char *temp_str = strstr(response, "temperature");
-        if (!temp_str) {
-            temp_str = strstr(response, "temp");
-        }
-        
-        if (temp_str) {
-            // 提取数字
-            for (char *p = temp_str; *p; p++) {
-                if (isdigit(*p)) {
-                    int temp = atoi(p);
-                    pclose(fp);
-                    return temp;
-                }
-            }
-        }
-    }
-    
-    pclose(fp);
-    return -1;
-}
 
-// FreeBSD风格的温度读取（TrueNAS CORE）
-int read_temperature_freebsd_style(void) {
-    // 尝试FreeBSD的sysctl接口
-    FILE *fp = popen("sysctl -a 2>/dev/null | grep -i temperature", "r");
-    if (!fp) {
-        return -1;
-    }
-    
-    char line[256];
-    int max_temp = -1;
-    
-    while (fgets(line, sizeof(line), fp)) {
-        // 解析类似: dev.cpu.0.temperature: 45.0C
-        char *colon = strchr(line, ':');
-        if (colon) {
-            colon++;
-            // 查找数字
-            char *num_start = colon;
-            while (*num_start && !isdigit(*num_start)) {
-                num_start++;
-            }
-            
-            if (isdigit(*num_start)) {
-                int temp = atoi(num_start);
-                if (temp > max_temp) {
-                    max_temp = temp;
-                }
-            }
-        }
-    }
-    
-    pclose(fp);
-    
-    // 如果没找到，尝试内核温度设备
-    fp = fopen("/dev/systemperature", "r");
-    if (fp) {
-        // 读取温度...
-        fclose(fp);
-    }
-    
-    return max_temp;
-}
+
 // 读取CPU数据
 void read_cpu_data(CPUData *data) {
     FILE *file = fopen("/proc/stat", "r");
@@ -1557,25 +1518,560 @@ int read_file(const char *filename, char *buffer, size_t buffer_size) {
     fclose(file);
     return 0;
 }
-// 执行命令并获取输出
-int execute_command(const char *cmd, char *output, size_t output_size) {
-    FILE *fp = popen(cmd, "r");
-    if (!fp) return -1;
+char* my_strtok_r(char* str, const char* delim, char** saveptr) {
+    char* token;
     
-    if (fgets(output, output_size, fp) == NULL) {
-        pclose(fp);
+    if (str != NULL) {
+        *saveptr = str;
+    }
+    
+    if (*saveptr == NULL) {
+        return NULL;
+    }
+    
+    /* 跳过前导分隔符 */
+    *saveptr += strspn(*saveptr, delim);
+    if (**saveptr == '\0') {
+        return NULL;
+    }
+    
+    /* 找到下一个分隔符 */
+    token = *saveptr;
+    *saveptr = strpbrk(token, delim);
+    if (*saveptr != NULL) {
+        **saveptr = '\0';
+        (*saveptr)++;
+    }
+    
+    return token;
+}
+
+void trim_newline(char* str) {
+    if (str == NULL) return;
+    
+    size_t len = strlen(str);
+    if (len > 0 && str[len-1] == '\n') {
+        str[len-1] = '\0';
+    }
+}
+
+void trim_whitespace(char* str) {
+    if (str == NULL) return;
+    
+    char* start = str;
+    while (isspace((unsigned char)*start)) start++;
+    
+    if (*start == '\0') {
+        str[0] = '\0';
+        return;
+    }
+    
+    char* end = start + strlen(start) - 1;
+    while (end > start && isspace((unsigned char)*end)) end--;
+    
+    *(end + 1) = '\0';
+    
+    if (start != str) {
+        memmove(str, start, strlen(start) + 1);
+    }
+}
+
+void safe_strncpy(char* dest, const char* src, size_t dest_size) {
+    if (dest == NULL || src == NULL || dest_size == 0) return;
+    
+    size_t src_len = strlen(src);
+    if (src_len >= dest_size) {
+        src_len = dest_size - 1;
+    }
+    
+    memcpy(dest, src, src_len);
+    dest[src_len] = '\0';
+}
+
+unsigned long long parse_size_with_unit(const char* size_str) {
+    if (size_str == NULL || strlen(size_str) == 0) {
+        return 0;
+    }
+    
+    char* endptr;
+    double value = strtod(size_str, &endptr);
+    
+    if (endptr == size_str) {
+        return 0;
+    }
+    
+    if (strstr(size_str, "K") != NULL || strstr(size_str, "k") != NULL) {
+        return (unsigned long long)(value * 1024);
+    } else if (strstr(size_str, "M") != NULL || strstr(size_str, "m") != NULL) {
+        return (unsigned long long)(value * 1024 * 1024);
+    } else if (strstr(size_str, "G") != NULL || strstr(size_str, "g") != NULL) {
+        return (unsigned long long)(value * 1024 * 1024 * 1024);
+    } else if (strstr(size_str, "T") != NULL || strstr(size_str, "t") != NULL) {
+        return (unsigned long long)(value * 1024 * 1024 * 1024 * 1024);
+    } else {
+        return (unsigned long long)value;
+    }
+}
+
+double bytes_to_gb(unsigned long long bytes) {
+    return bytes / (1024.0 * 1024.0 * 1024.0);
+}
+
+double calculate_percentage(unsigned long long part, unsigned long long total) {
+    if (total == 0) return 0.0;
+    return (double)part / (double)total * 100.0;
+}
+
+int execute_command(const char* cmd, char* buffer, size_t buffer_size) {
+    if (cmd == NULL || buffer == NULL || buffer_size == 0) {
         return -1;
     }
     
-    output[strcspn(output, "\n")] = 0;
-    pclose(fp);
-    return 0;
+    FILE* fp = popen(cmd, "r");
+    if (fp == NULL) {
+        fprintf(stderr, "Failed to execute command: %s\n", cmd);
+        buffer[0] = '\0';
+        return -1;
+    }
+    
+    size_t bytes_read = 0;
+    size_t total_read = 0;
+    
+    while (!feof(fp) && total_read < buffer_size - 1) {
+        bytes_read = fread(buffer + total_read, 1, buffer_size - 1 - total_read, fp);
+        total_read += bytes_read;
+    }
+    
+    buffer[total_read] = '\0';
+    
+    int status = pclose(fp);
+    return status;
 }
-// 获取硬盘温度
+
+/* ==================== 主要功能函数实现 ==================== */
+
+int get_non_system_pools(PoolInfo* pools, int max_pools) {
+    char buffer[4096];
+    int pool_count = 0;
+    
+    /* 获取所有存储池 */
+    if (execute_command("zpool list -H -o name,guid", buffer, sizeof(buffer)) != 0) {
+        fprintf(stderr, "Failed to get zpool list\n");
+        return 0;
+    }
+    
+    /* 使用线程安全的字符串分割 */
+    char* saveptr = NULL;
+    char* line = my_strtok_r(buffer, "\n", &saveptr);
+    
+    while (line != NULL && pool_count < max_pools) {
+        /* 复制行内容，避免修改原始数据 */
+        char line_copy[512];
+        strcpy(line_copy, line);
+        
+        char* tab_pos = strchr(line_copy, '\t');
+        if (tab_pos != NULL) {
+            *tab_pos = '\0';
+            
+            char* pool_name = line_copy;
+            char* pool_guid = tab_pos + 1;
+            
+            trim_whitespace(pool_name);
+            trim_whitespace(pool_guid);
+            
+            /* 排除系统池 */
+            if (strcmp(pool_name, "boot-pool") != 0 &&
+                strcmp(pool_name, "freenas-boot") != 0 &&
+                strcmp(pool_name, "system") != 0 &&
+                strlen(pool_name) > 0) {
+                
+                safe_strncpy(pools[pool_count].name, pool_name, sizeof(pools[pool_count].name));
+                safe_strncpy(pools[pool_count].guid, pool_guid, sizeof(pools[pool_count].guid));
+                pools[pool_count].zvol_count = 0;
+                pools[pool_count].disk_uuids[0] = '\0';
+                
+                pool_count++;
+            }
+        }
+        
+        line = my_strtok_r(NULL, "\n", &saveptr);
+    }
+    
+    return pool_count;
+}
+
+void get_pool_disk_uuids(const char* pool_name, char* disk_uuids, size_t buffer_size) {
+    if (pool_name == NULL || disk_uuids == NULL || buffer_size == 0) {
+        return;
+    }
+    
+    char buffer[8192];
+    char cmd[512];
+    
+    /* 获取zpool状态 */
+    snprintf(cmd, sizeof(cmd), "zpool status %s", pool_name);
+    execute_command(cmd, buffer, sizeof(buffer));
+    
+    disk_uuids[0] = '\0';
+    
+    /* 使用线程安全的方式解析 */
+    char* saveptr = NULL;
+    char* line = my_strtok_r(buffer, "\n", &saveptr);
+    int first_uuid = 1;
+    
+    while (line != NULL) {
+        trim_whitespace(line);
+        
+        /* 查找UUID */
+        for (int i = 0; line[i] != '\0'; i++) {
+            if (line[i] == '-' && i >= 8) {
+                int valid_uuid = 1;
+                for (int j = 0; j < 36; j++) {
+                    int pos = i - 8 + j;
+                    if (pos >= (int)strlen(line)) {
+                        valid_uuid = 0;
+                        break;
+                    }
+                    
+                    char c = line[pos];
+                    if (j == 8 || j == 13 || j == 18 || j == 23) {
+                        if (c != '-') valid_uuid = 0;
+                    } else if (!isxdigit(c)) {
+                        valid_uuid = 0;
+                    }
+                }
+                
+                if (valid_uuid) {
+                    char uuid[37];
+                    strncpy(uuid, &line[i-8], 36);
+                    uuid[36] = '\0';
+                    
+                    if (!first_uuid) {
+                        if (strlen(disk_uuids) + 3 < buffer_size) {
+                            strcat(disk_uuids, "; ");
+                        }
+                    }
+                    
+                    if (strlen(disk_uuids) + strlen(uuid) < buffer_size) {
+                        strcat(disk_uuids, uuid);
+                        first_uuid = 0;
+                    }
+                    
+                    break;
+                }
+            }
+        }
+        
+        line = my_strtok_r(NULL, "\n", &saveptr);
+    }
+    
+    if (strlen(disk_uuids) == 0) {
+        safe_strncpy(disk_uuids, "Unknown", buffer_size);
+    }
+}
+
+void get_zvol_creation_time(const char* zvol_path, char* create_time, size_t buffer_size) {
+    if (zvol_path == NULL || create_time == NULL || buffer_size == 0) {
+        safe_strncpy(create_time, "Unknown", buffer_size);
+        return;
+    }
+    
+    char buffer[256];
+    char cmd[512];
+    
+    snprintf(cmd, sizeof(cmd), "zfs get -H -o value creation %s", zvol_path);
+    execute_command(cmd, buffer, sizeof(buffer));
+    
+    trim_whitespace(buffer);
+    
+    if (strlen(buffer) > 0 && strcmp(buffer, "-") != 0) {
+        /* 只取日期部分 */
+        char* space_pos = strchr(buffer, ' ');
+        if (space_pos != NULL) {
+            *space_pos = '\0';
+        }
+        safe_strncpy(create_time, buffer, buffer_size);
+    } else {
+        safe_strncpy(create_time, "Unknown", buffer_size);
+    }
+}
+
+void get_zvol_written_data(const char* zvol_path, unsigned long long* written_bytes) {
+    *written_bytes = 0;
+    
+    if (zvol_path == NULL) return;
+    
+    char buffer[256];
+    char cmd[512];
+    
+    /* 尝试获取written属性 */
+    snprintf(cmd, sizeof(cmd), "zfs get -H -o value written %s", zvol_path);
+    execute_command(cmd, buffer, sizeof(buffer));
+    trim_whitespace(buffer);
+    
+    if (strlen(buffer) > 0 && strcmp(buffer, "-") != 0) {
+        *written_bytes = parse_size_with_unit(buffer);
+        return;
+    }
+    
+    /* 尝试referenced属性 */
+    snprintf(cmd, sizeof(cmd), "zfs get -H -o value referenced %s", zvol_path);
+    execute_command(cmd, buffer, sizeof(buffer));
+    trim_whitespace(buffer);
+    
+    if (strlen(buffer) > 0 && strcmp(buffer, "-") != 0) {
+        *written_bytes = parse_size_with_unit(buffer);
+        return;
+    }
+    
+    /* 最后尝试used属性 */
+    snprintf(cmd, sizeof(cmd), "zfs get -H -o value used %s", zvol_path);
+    execute_command(cmd, buffer, sizeof(buffer));
+    trim_whitespace(buffer);
+    
+    if (strlen(buffer) > 0 && strcmp(buffer, "-") != 0) {
+        *written_bytes = parse_size_with_unit(buffer);
+    }
+}
+
+int get_zvols_for_pool(const char* pool_name, const char* disk_uuids, ZvolInfo* zvols, int max_zvols) {
+    if (pool_name == NULL || zvols == NULL) {
+        return 0;
+    }
+    
+    char buffer[32768];  /* 更大的缓冲区 */
+    char cmd[512];
+    int zvol_count = 0;
+    
+    /* 获取存储池的所有ZVOL */
+    snprintf(cmd, sizeof(cmd), "zfs list -t volume -H -o name,volsize -r %s", pool_name);
+    
+    if (execute_command(cmd, buffer, sizeof(buffer)) != 0) {
+        fprintf(stderr, "Failed to get ZVOL list for pool %s\n", pool_name);
+        return 0;
+    }
+    
+    printf("Raw output for pool %s:\n%s\n", pool_name, buffer);
+    
+    /* 使用线程安全的方式解析 */
+    char* saveptr = NULL;
+    char* line = my_strtok_r(buffer, "\n", &saveptr);
+    
+    while (line != NULL && zvol_count < max_zvols) {
+        /* 复制行内容 */
+        char line_copy[512];
+        strcpy(line_copy, line);
+        
+        char* tab_pos = strchr(line_copy, '\t');
+        if (tab_pos != NULL) {
+            *tab_pos = '\0';
+            
+            char* zvol_path = line_copy;
+            char* volsize_str = tab_pos + 1;
+            
+            trim_whitespace(zvol_path);
+            trim_whitespace(volsize_str);
+            
+            /* 排除存储池本身 */
+            if (strcmp(zvol_path, pool_name) != 0) {
+                printf("Found ZVOL: %s\n", zvol_path);
+                
+                /* 提取ZVOL名称 */
+                char* slash = strrchr(zvol_path, '/');
+                char zvol_name[256];
+                if (slash != NULL) {
+                    strcpy(zvol_name, slash + 1);
+                } else {
+                    strcpy(zvol_name, zvol_path);
+                }
+                
+                /* 获取volsize */
+                unsigned long long volsize_bytes = parse_size_with_unit(volsize_str);
+                
+                /* 获取Data Written */
+                unsigned long long written_bytes = 0;
+                get_zvol_written_data(zvol_path, &written_bytes);
+                
+                /* 获取创建时间 */
+                char create_time[64];
+                get_zvol_creation_time(zvol_path, create_time, sizeof(create_time));
+                
+                /* 填充ZVOL信息 */
+                safe_strncpy(zvols[zvol_count].name, zvol_name, sizeof(zvols[zvol_count].name));
+                safe_strncpy(zvols[zvol_count].full_path, zvol_path, sizeof(zvols[zvol_count].full_path));
+                safe_strncpy(zvols[zvol_count].parent_pool, pool_name, sizeof(zvols[zvol_count].parent_pool));
+                safe_strncpy(zvols[zvol_count].disk_uuids, disk_uuids, sizeof(zvols[zvol_count].disk_uuids));
+                safe_strncpy(zvols[zvol_count].create_time, create_time, sizeof(zvols[zvol_count].create_time));
+                
+                char *partuuid = zvols[zvol_count].disk_uuids;
+                
+                char *device_path = find_device_by_partuuid(partuuid);
+                if (device_path == NULL) {
+                    printf("Can not find PARTUUID\n");
+                    return 1;
+                }
+                char *disk_name = extract_disk_name(device_path);
+                if (disk_name == NULL) {
+                    printf("Can not find disk name\n");
+                    free(device_path);
+                    return 1;
+                }
+                zvols[zvol_count].temperature = get_disk_temperature(disk_name);
+                zvols[zvol_count].total_gb = bytes_to_gb(volsize_bytes);
+                zvols[zvol_count].written_gb = bytes_to_gb(written_bytes);
+                zvols[zvol_count].usage_percent = calculate_percentage(written_bytes, volsize_bytes);
+                
+                printf("  Added: %s (Size: %llu bytes, Written: %llu bytes)\n", 
+                       zvol_name, volsize_bytes, written_bytes);
+                
+                zvol_count++;
+            }
+        }
+        
+        line = my_strtok_r(NULL, "\n", &saveptr);
+    }
+    
+    return zvol_count;
+}
+char* extract_disk_name(const char *device_path) {
+    if (device_path == NULL) {
+        return NULL;
+    }
+    
+    // 复制输入字符串以避免修改原数据
+    char *path = strdup(device_path);
+    if (path == NULL) {
+        return NULL;
+    }
+    
+    // 找到最后一个 '/' 的位置
+    char *base = strrchr(path, '/');
+    if (base == NULL) {
+        base = path;  // 如果没有 '/'，使用整个字符串
+    } else {
+        base++;  // 跳过 '/'
+    }
+    
+    char *result = NULL;
+    
+    // 处理 NVMe 设备 (如 /dev/nvme0n1p1)
+    if (strncmp(base, "nvme", 4) == 0) {
+        char *p = base;
+        // 找到 'p' 的位置（分区标识）
+        while (*p && *p != 'p') {
+            p++;
+        }
+        if (*p == 'p') {
+            *p = '\0';  // 截断字符串，去掉分区部分
+            result = strdup(base);
+        }
+    }
+    // 处理 MMC/SD 设备 (如 /dev/mmcblk0p1)
+    else if (strncmp(base, "mmcblk", 6) == 0) {
+        char *p = base;
+        // 找到 'p' 的位置
+        while (*p && *p != 'p') {
+            p++;
+        }
+        if (*p == 'p') {
+            *p = '\0';  // 截断字符串
+            result = strdup(base);
+        }
+    }
+    // 处理标准 SATA/SCSI 设备 (如 /dev/sda1, /dev/sdb2)
+    else if ((base[0] == 's' || base[0] == 'h' || base[0] == 'v') && 
+             (base[1] == 'd' || base[1] == 'a')) {
+        // 找到第一个数字的位置（分区号开始处）
+        char *p = base;
+        while (*p && !(*p >= '0' && *p <= '9')) {
+            p++;
+        }
+        if (*p != '\0') {
+            // 复制到分区号之前的部分
+            int len = p - base;
+            result = (char *)malloc(len + 1);
+            if (result != NULL) {
+                strncpy(result, base, len);
+                result[len] = '\0';
+            }
+        }
+    }
+    
+    free(path);
+    
+    // 如果没有匹配到任何模式，返回原始基础名称
+    if (result == NULL) {
+        result = strdup(base);
+    }
+    
+    return result;
+}
+void display_results(PoolInfo* pools, int pool_count) {
+    printf("\n=====================================================\n");
+    printf("                 DETAILED REPORT\n");
+    printf("=====================================================\n\n");
+    
+    for (int i = 0; i < pool_count; i++) {
+        printf("POOL: %s (GUID: %s)\n", pools[i].name, pools[i].guid);
+        printf("Disk UUIDs: %s\n", pools[i].disk_uuids);
+        printf("ZVOL Count: %d\n", pools[i].zvol_count);
+        printf("-..............................................................");
+        printf("\n");
+        
+        if (pools[i].zvol_count == 0) {
+            printf("  No ZVOLs found.\n");
+        } else {
+            for (int j = 0; j < pools[i].zvol_count; j++) {
+                printf("  ZVOL %d: %s\n", j+1, pools[i].zvols[j].name);
+                printf("    Path: %s\n", pools[i].zvols[j].full_path);
+                printf("    Created: %s\n", pools[i].zvols[j].create_time);
+                printf("    Total: %.2f GB\n", pools[i].zvols[j].total_gb);
+                printf("    Temperature: %d\n", pools[i].zvols[j].temperature);
+                printf("    Written: %.2f GB\n", pools[i].zvols[j].written_gb);
+                printf("    Usage: %.1f%%\n", pools[i].zvols[j].usage_percent);
+                printf("\n");
+            }
+        }
+        
+        printf("\n");
+    }
+}
+// 函数：通过UUID查找设备路径
+char* find_device_by_partuuid(const char *partuuid) {
+    char command[512];
+    char *device_path = NULL;
+    FILE *fp;
+    
+    // 构建命令
+    snprintf(command, sizeof(command), 
+             "blkid | grep 'PARTUUID=\"%s\"' | cut -d: -f1", 
+             partuuid);
+    
+    // 执行命令
+    fp = popen(command, "r");
+    if (fp == NULL) {
+        perror("popen failed");
+        return NULL;
+    }
+    
+    // 读取命令输出
+    char buffer[256];
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        // 去除换行符
+        buffer[strcspn(buffer, "\n")] = 0;
+        if (strlen(buffer) > 0) {
+            device_path = strdup(buffer);
+        }
+    }
+    
+    pclose(fp);
+    return device_path;
+}
+
+// 函数：获取磁盘温度
 int get_disk_temperature(const char *device) {
     char path[MAX_PATH];
     char temp_value[32];
-    
     // 方法1: 尝试smartctl
     char cmd[MAX_PATH];
     // 使用 -C 选项强制转换为摄氏度
@@ -1633,50 +2129,60 @@ int get_disk_temperature(const char *device) {
     
     return -1; // 无法获取温度
 }
-// 获取硬盘型号和序列号
-void get_disk_identity(const char *device, char *model, char *serial) {
-    char path[MAX_PATH];
+int get_total_zvols_count() {
+    int count = 0;
+    for (int i = 0; i < pool_count; i++) {
+        count += pools[i].zvol_count;
+    }
+    return count;
+}
+AllZvols* merge_all_zvols() {
+    // 1. 计算总共的ZVOL数量
+    int total_count = get_total_zvols_count();
     
-    // 获取型号
-    if (strncmp(device, "nvme", 4) == 0) {
-        snprintf(path, sizeof(path), "/sys/class/nvme/%s/model", device);
-    } else {
-        snprintf(path, sizeof(path), "/sys/block/%s/device/model", device);
+    if (total_count == 0) {
+        printf("Can not find any Zvol\n");
+        return NULL;
     }
     
-    if (read_file(path, model, 128) != 0) {
-        strcpy(model, "Unknown");
-    } else {
-        // 去除换行符
-        model[strcspn(model, "\n")] = 0;
+    // 2. 分配内存给新结构体
+    AllZvols* all_zvols = (AllZvols*)malloc(sizeof(AllZvols));
+    if (all_zvols == NULL) {
+        perror("分配AllZvols结构体内存失败");
+        return NULL;
     }
     
-    // 获取序列号
-    if (strncmp(device, "nvme", 4) == 0) {
-        snprintf(path, sizeof(path), "/sys/class/nvme/%s/serial", device);
-    } else {
-        snprintf(path, sizeof(path), "/sys/block/%s/device/serial", device);
+    // 3. 分配内存给ZVOL数组
+    all_zvols->all_zvols = (ZvolInfo*)malloc(total_count * sizeof(ZvolInfo));
+    if (all_zvols->all_zvols == NULL) {
+        perror("分配ZVOL数组内存失败");
+        free(all_zvols);
+        return NULL;
     }
     
-    if (read_file(path, serial, 64) != 0) {
-        strcpy(serial, "Unknown");
-    } else {
-        serial[strcspn(serial, "\n")] = 0;
+    // 4. 设置总ZVOL数量
+    all_zvols->total_zvols = total_count;
+    
+    // 5. 复制所有ZVOL数据
+    int current_index = 0;
+    for (int i = 0; i < pool_count; i++) {
+        PoolInfo* pool = &pools[i];
+        for (int j = 0; j < pool->zvol_count; j++) {
+            // 使用memcpy复制整个ZvolInfo结构
+            memcpy(&all_zvols->all_zvols[current_index], 
+                   &pool->zvols[j], 
+                   sizeof(ZvolInfo));
+            current_index++;
+        }
     }
+    
+    printf("Success merge %d ZVOL to new struct\n", total_count);
+    return all_zvols;
 }
 
-// 获取硬盘总容量
-unsigned long long get_disk_size(const char *device) {
-    char path[MAX_PATH];
-    snprintf(path, sizeof(path), "/sys/block/%s/size", device);
-    
-    char size_str[32];
-    if (read_file(path, size_str, sizeof(size_str)) == 0) {
-        unsigned long long sectors = strtoull(size_str, NULL, 10);
-        return sectors * 512; // 转换为字节
-    }
-    return 0;
-}
+
+
+
 int GetUserCount()
 {
     FILE *fp;
@@ -1695,222 +2201,10 @@ int GetUserCount()
     pclose(fp);
     return count;
 }
-// 获取挂载点
-void get_mountpoint(const char *device, char *mountpoint) {
-    FILE *mtab;
-    struct mntent *entry;
-    char full_device[64];
-    
-    // 构建完整的设备路径
-    snprintf(full_device, sizeof(full_device), "/dev/%s", device);
-    
-    mtab = setmntent("/proc/mounts", "r");
-    if (mtab == NULL) {
-        return;
-    }
-    
-    // 查找设备的挂载点
-    while ((entry = getmntent(mtab)) != NULL) {
-        if (strcmp(entry->mnt_fsname, full_device) == 0) {
-            strncpy(mountpoint, entry->mnt_dir, 255);
-            mountpoint[255] = '\0';
-            break;
-        }
-        // 也检查分区（如 sda1, sda2 等）
-        if (strncmp(entry->mnt_fsname, full_device, strlen(full_device)) == 0) {
-            strncpy(mountpoint, entry->mnt_dir, 255);
-            mountpoint[255] = '\0';
-            break;
-        }
-    }
-    
-    endmntent(mtab);
-}
 
-// 获取挂载点使用情况
-int get_mountpoint_usage(const char *mountpoint, unsigned long long *total, 
-                        unsigned long long *free, unsigned long long *used) {
-    struct statvfs buf;
-    if (statvfs(mountpoint, &buf) != 0) {
-        return -1;
-    }
-    
-    *total = (unsigned long long)buf.f_blocks * buf.f_frsize;
-    *free = (unsigned long long)buf.f_bfree * buf.f_frsize;
-    *used = *total - *free;
-    
-    return 0;
-}
 
-// 扫描所有硬盘设备
-int scan_disk_devices(disk_info_t *disks, int max_disks) {
-    DIR *block_dir = opendir("/sys/block");
-    if (!block_dir) {
-        return 0;
-    }
-    
-    struct dirent *entry;
-    int disk_count = 0;
-    char path[1024];
-    FILE *file;
-    
-    while ((entry = readdir(block_dir)) != NULL && disk_count < max_disks) {
-        // 跳过当前目录和上级目录
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-            continue;
-        }
-        
-        // 过滤虚拟设备
-        if (strncmp(entry->d_name, "loop", 4) == 0 ||
-            strncmp(entry->d_name, "ram", 3) == 0 ||
-            strncmp(entry->d_name, "fd", 2) == 0 ||
-            strncmp(entry->d_name, "sr", 2) == 0 ||    // 光驱
-            strncmp(entry->d_name, "dm-", 3) == 0) {  // device mapper
-            continue;
-        }
-        
-        // 检查是否为真实物理设备
-        snprintf(path, sizeof(path), "/sys/block/%s/device", entry->d_name);
-        if (access(path, F_OK) != 0) {
-            continue; // 没有device目录，可能是虚拟设备
-        }
-        
-        // 检查是否可移动设备
-        int removable = 0;
-        snprintf(path, sizeof(path), "/sys/block/%s/removable", entry->d_name);
-        file = fopen(path, "r");
-        if (file) {
-            fscanf(file, "%d", &removable);
-            fclose(file);
-        }
-        
-        // 跳过可移动设备
-        if (removable) {
-            continue;
-            // // 检查是否有介质
-            // snprintf(path, sizeof(path), "/sys/block/%s/size", entry->d_name);
-            // file = fopen(path, "r");
-            // if (file) {
-            //     unsigned long long size_blocks = 0;
-            //     fscanf(file, "%llu", &size_blocks);
-            //     fclose(file);
-            //     if (size_blocks == 0) {
-            //         continue; // 可移动设备但没有介质
-            //     }
-            // } else {
-            //     continue; // 无法读取size，可能是无效设备
-            // }
-        }
-        
-        // 检查设备大小，过滤掉大小为0的设备
-        unsigned long long size = get_disk_size(entry->d_name);
-        if (size == 0) {
-            continue;
-        }
-        
-        // 更准确的分区检测
-        snprintf(path, sizeof(path), "/sys/block/%s/partition", entry->d_name);
-        if (access(path, F_OK) == 0) {
-            continue; // 这是一个分区
-        }
-        
-        // 检查是否有子分区（如果有分区表，通常会有子设备）
-        int has_partitions = 0;
-        DIR *subdir;
-        char subpath[1024];
-        snprintf(path, sizeof(path), "/sys/block/%s", entry->d_name);
-        subdir = opendir(path);
-        if (subdir) {
-            struct dirent *subentry;
-            while ((subentry = readdir(subdir)) != NULL) {
-                if (strncmp(subentry->d_name, entry->d_name, strlen(entry->d_name)) == 0) {
-                    // 检查是否是分区设备（如sdb1, sdb2等）
-                    snprintf(subpath, sizeof(subpath), "/sys/block/%s/%s/partition", 
-                            entry->d_name, subentry->d_name);
-                    if (access(subpath, F_OK) == 0) {
-                        has_partitions = 1;
-                        break;
-                    }
-                }
-            }
-            closedir(subdir);
-        }
-        
-        // 支持更多设备类型
-        if (strncmp(entry->d_name, "sd", 2) == 0 || 
-            strncmp(entry->d_name, "nvme", 4) == 0 ||
-            strncmp(entry->d_name, "hd", 2) == 0 ||      // IDE设备
-            strncmp(entry->d_name, "vd", 2) == 0) {     // VirtIO设备
-            
-            // 额外的设备可用性检查
-            snprintf(path, sizeof(path), "/dev/%s", entry->d_name);
-            if (access(path, F_OK) != 0) {
-                continue; // 设备节点不存在
-            }
-            
-            strncpy(disks[disk_count].device, entry->d_name, 32);
-            
-            // 确定硬盘类型
-            if (strncmp(entry->d_name, "nvme", 4) == 0) {
-                strcpy(disks[disk_count].type, "NVMe");
-            } else if (strncmp(entry->d_name, "sd", 2) == 0) {
-                // 进一步区分SATA和USB
-                snprintf(path, sizeof(path), "/sys/block/%s/device/vendor", entry->d_name);
-                file = fopen(path, "r");
-                if (file) {
-                    char vendor[64] = {0};
-                    if (fgets(vendor, sizeof(vendor), file)) {
-                        // 可以根据vendor信息更准确判断
-                        if (strstr(vendor, "USB") || strstr(vendor, "usb")) {
-                            strcpy(disks[disk_count].type, "USB");
-                        } else {
-                            strcpy(disks[disk_count].type, "SATA");
-                        }
-                    }
-                    fclose(file);
-                } else {
-                    strcpy(disks[disk_count].type, "SATA/USB");
-                }
-            } else if (strncmp(entry->d_name, "hd", 2) == 0) {
-                strcpy(disks[disk_count].type, "IDE");
-            } else if (strncmp(entry->d_name, "vd", 2) == 0) {
-                strcpy(disks[disk_count].type, "VirtIO");
-            }
-            
-            // 标记是否为可移动设备
-            //disks[disk_count].removable = removable;
-            
-            // 获取基本信息
-            get_disk_identity(entry->d_name, 
-                            disks[disk_count].model, 
-                            disks[disk_count].serial);
-            
-            disks[disk_count].total_size = size/1024/1024/1024; // Change to GB
-            
-            get_mountpoint(entry->d_name, disks[disk_count].mountpoint);
-            
-            // 如果有挂载点，获取使用情况
-            if (strlen(disks[disk_count].mountpoint) > 0) {
-                unsigned long long total, free, used;
-                if (get_mountpoint_usage(disks[disk_count].mountpoint, &total, &free, &used) == 0) {
-                    disks[disk_count].free_size = free/1024/1024/1024; // Change to GB
-                    disks[disk_count].used_size = used/1024/1024/1024; // Change to GB
-                    if (total > 0) {
-                        disks[disk_count].usage_percent = ((double)used / total) * 100.0;
-                    }
-                }
-            }
-            
-            // 获取温度
-            disks[disk_count].temperature = get_disk_temperature(entry->d_name);
-            
-            disk_count++;
-        }
-    }
-    
-    closedir(block_dir);
-    return disk_count;
-}
+
+
 
 //6266 CMD
 // 获取 I/O 端口权限
@@ -2317,29 +2611,26 @@ void* hid_send_thread(void* arg) {
             {
                 //1 Min Do
                 for (int i = 0; i < disk_count; i++) {
-                    if (disks[i].temperature != -1) {
-                        int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
-
-                        append_crc(request);
-                        if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
-                        printf("Failed to write Disk data\n");
-                        break;
-                        }
-                        #if DebugToken
-                        printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
-                        #endif
-                        // printf("diskreportsize: %d\n",diskreportsize);
-                        // printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
-                        // printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
-                        // printf("Disktotal: %d\n",request->disk_data.disk_info.total_size);
-                        // printf("Diskused: %d\n",request->disk_data.disk_info.used_size);
-                        // printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
-                        // printf("DiskCRC: %d\n",request->disk_data.crc);
-                        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-                        // 休眠1秒，但分段休眠以便及时响应退出
-                        for (int i = 0; i < 10 && running; i++) {
-                            usleep(100000); // 100ms
-                        }
+                    int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
+                    append_crc(request);
+                    if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
+                    printf("Failed to write Disk data\n");
+                    break;
+                    }
+                    #if DebugToken
+                    printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
+                    #endif
+                    printf("diskreportsize: %d\n",diskreportsize);
+                    printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
+                    printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
+                    printf("Disktotal: %d\n",request->disk_data.disk_info.total_size);
+                    printf("Diskused: %d\n",request->disk_data.disk_info.used_size);
+                    printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
+                    printf("DiskCRC: %d\n",request->disk_data.crc);
+                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    // 休眠1秒，但分段休眠以便及时响应退出
+                    for (int i = 0; i < 10 && running; i++) {
+                        usleep(100000); // 100ms
                     }
                 }
             }
@@ -2461,10 +2752,10 @@ void* hid_send_thread(void* arg) {
                 case DiskPage_AIM:
                     int disk_maxtemp = 0;
                     for (int i = 0; i < disk_count; i++) {
-                        if (disks[i].temperature != -1) {
-                            if(disk_maxtemp < disks[i].temperature)
+                        if (all_zvols->all_zvols[i].temperature != -1) {
+                            if(disk_maxtemp < all_zvols->all_zvols[i].temperature)
                             {
-                                disk_maxtemp = disks[i].temperature;
+                                disk_maxtemp = all_zvols->all_zvols[i].temperature;
                             }
                             int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
                             append_crc(request);
@@ -2472,13 +2763,16 @@ void* hid_send_thread(void* arg) {
                             printf("Failed to write Disk data\n");
                             break;
                             }
-                            // printf("diskreportsize: %d\n",diskreportsize);
-                            // printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
-                            // printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
-                            // printf("Disktotal: %d\n",request->disk_data.disk_info.total_size);
-                            // printf("Diskused: %d\n",request->disk_data.disk_info.used_size);
-                            // printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
-                            // printf("DiskCRC: %d\n",request->disk_data.crc);
+                            #if DebugToken
+                            printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
+                            #endif
+                            printf("diskreportsize: %d\n",diskreportsize);
+                            printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
+                            printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
+                            printf("Disktotal: %d\n",request->disk_data.disk_info.total_size);
+                            printf("Diskused: %d\n",request->disk_data.disk_info.used_size);
+                            printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
+                            printf("DiskCRC: %d\n",request->disk_data.crc);
                             memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
                             // 休眠1秒，但分段休眠以便及时响应退出
                             for (int i = 0; i < 10 && running; i++) {
@@ -2510,7 +2804,7 @@ void* hid_send_thread(void* arg) {
                     printf("-----------------------------------UserSendOK-----------------------------------\n");
                     #endif
                     
-                    int wlanspeedsize,wlantotalsize;
+                    int wlanspeedsize,wlantotalsize,wlanip;
                     for (int i = 0; i < g_iface_manager.count; i++)
                     {
                         wlanspeedsize = init_hidreport(request, SET, WlanSpeed_AIM,i);
@@ -2529,6 +2823,13 @@ void* hid_send_thread(void* arg) {
                         }
                         memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
                         TimeSleep1Sec();
+                        wlanip = init_hidreport(request, SET, WlanIP_AIM, i);
+                        append_crc(request);
+                        if (safe_hid_write(handle, hid_report, wlanip) == -1) {
+                            printf("Failed to write WlanIP data\n");
+                        }
+                        TimeSleep1Sec();
+                        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
                         #if DebugToken
                         printf("-----------------------------------WLANSpeedTotalSendOK%dTime-----------------------------------\n",i);
                         #endif
