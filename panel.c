@@ -373,8 +373,16 @@ int main(void) {
     }
     //Merge Zvol
     all_zvols = merge_all_zvols();
-    disk_count = all_zvols->total_zvols;
+    if (all_zvols == NULL)
+    {
+        disk_count = 0;
+    }
+    else
+    {
+        disk_count = all_zvols->total_zvols;
+    }
     printf("User Count :%d\n",GetUserCount());
+    
     // 显示所有存储池信息
         // if (volume_count == 0) {
         //     printf("No non-system ZFS volumes found.\n");
