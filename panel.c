@@ -1202,14 +1202,15 @@ int get_cpu_temperature() {
             int temp_raw;
             if (fscanf(temp_file, "%d", &temp_raw) == 1) {
                 temperature = temp_raw / 1000;
-                fclose(temp_file);
                 
                 // 验证温度值是否合理
                 if (temperature > 0 && temperature < 150) {
+                    fclose(temp_file);  // 只在返回前关闭
                     return temperature;
                 }
+                // 温度不合理，继续尝试其他zone
             }
-            fclose(temp_file);
+            fclose(temp_file);  // 统一在这里关闭
         }
     }
     // 方法2: 尝试hwmon接口 (更通用)
