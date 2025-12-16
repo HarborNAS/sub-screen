@@ -132,54 +132,51 @@ int GetUserCount();
 int file_exists(const char *filename);
 int read_file(const char *filename, char *buffer, size_t buffer_size);
 //Disk
-typedef struct {
-    char name[256];           /* ZVOL名称 */
-    char full_path[512];      /* 完整ZFS路径 */
-    char parent_pool[256];    /* 父存储池 */
-    double total_gb;          /* 总容量 (GB) */
-    double written_gb;        /* 已写入数据 (GB) */
-    double usage_percent;     /* 使用率 (%) */
-    char disk_uuids[2048];    /* 磁盘UUID列表 */
-    char create_time[64];     /* 创建时间 */
-    char temperature;
-} ZvolInfo;
+// 硬盘池信息结构体
+#define MAX_POOLS 20
+#define MAX_DISKS_PER_POOL 20
+#define MAX_PATH 256
+#define MAX_OUTPUT 8192
+#define MAX_COMMAND 512  // 增加命令缓冲区大小
 
-/* 存储池信息结构体 */
+// 结构体定义
 typedef struct {
-    char name[256];           /* 存储池名称 */
-    char guid[64];            /* 存储池GUID */
-    char disk_uuids[2048];    /* 磁盘UUID列表 */
-    int zvol_count;           /* ZVOL数量 */
-    ZvolInfo zvols[50];       /* ZVOL数组 */
+    char name[MAX_PATH];
+    char partuuid[MAX_PATH];
+    char device_path[MAX_PATH];
+    char disk_name[MAX_PATH];
+    int temperature;
+} DiskInfo;
+
+typedef struct {
+    char name[MAX_PATH];
+    unsigned long long total_size;
+    unsigned long long used_size;
+    unsigned long long free_size;
+    DiskInfo disks[MAX_DISKS_PER_POOL];
+    int disk_count;
+    int highest_temp;
 } PoolInfo;
-typedef struct {
-    int total_zvols;          // ZVOL总数
-    ZvolInfo* all_zvols;      // 指向所有ZVOL的指针
-} AllZvols;
-void trim_newline(char* str);
-void trim_whitespace(char* str);
-unsigned long long parse_size_with_unit(const char* size_str);
-double bytes_to_gb(unsigned long long bytes);
-double calculate_percentage(unsigned long long part, unsigned long long total);
-int execute_command(const char* cmd, char* buffer, size_t buffer_size);
-void safe_strncpy(char* dest, const char* src, size_t dest_size);
-char* my_strtok_r(char* str, const char* delim, char** saveptr);
 
-/* 主要功能函数 */
-int get_non_system_pools(PoolInfo* pools, int max_pools);
-void get_pool_disk_uuids(const char* pool_name, char* disk_uuids, size_t buffer_size);
-int get_zvols_for_pool(const char* pool_name, const char* disk_uuids, ZvolInfo* zvols, int max_zvols);
-void get_zvol_written_data(const char* zvol_path, unsigned long long* written_bytes);
-void get_zvol_creation_time(const char* zvol_path, char* create_time, size_t buffer_size);
-char* extract_disk_name(const char *device_path);
-void display_results(PoolInfo* pools, int pool_count);
-char* find_device_by_partuuid(const char *partuuid);
-int get_disk_temperature(const char *device);
-AllZvols* merge_all_zvols();
-PoolInfo pools[20];           /* 存储池数组 */
-int pool_count = 0;           /* 存储池数量 */
-int total_zvols = 0;          /* 总ZVOL数量 */
-AllZvols* all_zvols;
+int execute_command(const char* command, char* output, size_t output_size);
+void trim_string(char* str);
+int file_exists(const char* path);
+int read_file(const char* path, char* buffer, size_t buffer_size);
+char* extract_disk_name(const char* device_path);
+int is_valid_device_name(const char* name);
+int is_uuid_format(const char* str);
+unsigned long long parse_size(const char* size_str);
+
+int get_all_pools(PoolInfo* pools, int max_pools);
+int get_pool_info(PoolInfo* pool);
+int get_pool_disks_and_partuuids(PoolInfo* pool);
+char* find_device_by_partuuid(const char* partuuid);
+int get_disk_temperature(const char* disk_name);
+int update_pool_temperatures(PoolInfo* pool);
+void display_pool_info(const PoolInfo* pool);
+
+PoolInfo pools[MAX_POOLS];
+int pool_count;
 
 //EC6266
 int acquire_io_permissions();
@@ -339,48 +336,47 @@ int main(void) {
     // release_io_permissions();
     #endif
     // 扫描硬盘设备 
-    pool_count = get_non_system_pools(pools, 20);
-        
+    pool_count = get_all_pools(pools, MAX_POOLS);
+    
     if (pool_count == 0) {
-        printf("No non-system ZFS pools found.\n");
-    } else {
-        printf("Found %d non-system pool(s):\n", pool_count);
-        for (int i = 0; i < pool_count; i++) {
-            printf("  %d. %s\n", i+1, pools[i].name);
+        printf("No storage pools found in the system.\n");
+        printf("Please check if ZFS is properly configured.\n");
+        return 1;
+    }
+    printf("Found %d storage pool(s):\n", pool_count);
+    for (int i = 0; i < pool_count; i++) {
+        printf("  %d. %s\n", i + 1, pools[i].name);
+    }
+    for (int i = 0; i < pool_count; i++) {
+        printf("Processing pool: %s\n", pools[i].name);
+        printf("%s\n", "--------------------------------------");
+        
+        // 2.1 获取池的基本信息
+        if (get_pool_info(&pools[i]) != 0) {
+            printf("Failed to get basic information for pool %s\n", pools[i].name);
+            continue;
         }
+        
+        // 2.2 获取池中所有磁盘及其 PARTUUID
+        int disk_count = get_pool_disks_and_partuuids(&pools[i]);
+        if (disk_count == 0) {
+            printf("No valid disks found in pool %s\n", pools[i].name);
+            continue;
+        }
+        
+        printf("Found %d disk(s) in pool %s\n", disk_count, pools[i].name);
+        
+        // 2.3 更新每个磁盘的温度信息
+        if (update_pool_temperatures(&pools[i]) == 0) {
+            printf("Warning: Failed to get temperature information for some disks\n");
+        }
+        
+        // 2.4 显示池的详细信息
+        //display_pool_info(&pools[i]);
+        
         printf("\n");
-        
-        /* 处理每个存储池 */
-        int total_zvols = 0;
-        for (int i = 0; i < pool_count; i++) {
-            printf("Processing pool: %s\n", pools[i].name);
-            
-            /* 获取存储池的磁盘UUID */
-            get_pool_disk_uuids(pools[i].name, pools[i].disk_uuids, sizeof(pools[i].disk_uuids));
-            
-            /* 获取存储池的ZVOL */
-            pools[i].zvol_count = get_zvols_for_pool(pools[i].name, 
-                                                    pools[i].disk_uuids, 
-                                                    pools[i].zvols, 
-                                                    50);
-            
-            total_zvols += pools[i].zvol_count;
-            printf("  Found %d ZVOL(s) in pool %s\n", pools[i].zvol_count, pools[i].name);
-        }
-        
-        /* 显示结果 */
-        display_results(pools, pool_count);
     }
-    //Merge Zvol
-    all_zvols = merge_all_zvols();
-    if (all_zvols == NULL)
-    {
-        disk_count = 0;
-    }
-    else
-    {
-        disk_count = all_zvols->total_zvols;
-    }
+
     printf("User Count :%d\n",GetUserCount());
     
     // 显示所有存储池信息
@@ -467,12 +463,12 @@ int main(void) {
            printf("Failed to write DiskPage data\n");
            break;
         }
-        ZvolInfo* zvol = &all_zvols->all_zvols[i];
-        printf("%-30s %-20s %-10.2f %-10.2f\n",
-               zvol->name,
-               zvol->parent_pool,
-               zvol->total_gb,
-               zvol->usage_percent);
+        // ZvolInfo* zvol = &all_zvols->all_zvols[i];
+        // printf("%-30s %-20s %-10.2f %-10.2f\n",
+        //        zvol->name,
+        //        zvol->parent_pool,
+        //        zvol->total_gb,
+        //        zvol->usage_percent);
         #if DebugToken
         // printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
         // printf("Diskpage Head: %x\n",request->header);
@@ -698,10 +694,10 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         request->length += sizeof(request->disk_data);
         request->disk_data.disk_info.disk_id = id;
         request->disk_data.disk_info.unit = 0x33;
-        ZvolInfo* zvol =&all_zvols->all_zvols[id];
-        request->disk_data.disk_info.total_size = zvol->total_gb;
-        request->disk_data.disk_info.used_size = zvol->written_gb;
-        request->disk_data.disk_info.temp = zvol->temperature;
+        // ZvolInfo* zvol =&all_zvols->all_zvols[id];
+        request->disk_data.disk_info.total_size = pools[id].total_size;
+        request->disk_data.disk_info.used_size = pools[id].used_size;
+        request->disk_data.disk_info.temp = pools[id].highest_temp;
         return offsetof(Request, disk_data.crc) + 1;
     // case GPU_AIM:
     //     request->length += sizeof(request->gpu_data);
@@ -936,55 +932,52 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         request->DiskPage_data.diskcount = disk_count;
         request->DiskPage_data.total = total;
         request->DiskPage_data.order = order;
-        ZvolInfo* zvol;
         if((disk_count - (order-1)*2) == 1)
         {
-            zvol = &all_zvols->all_zvols[(order - 1) * 2];
             request->DiskPage_data.count = 1;
             request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
             request->DiskPage_data.diskStruct[0].unit = 0x33;
             request->DiskPage_data.diskStruct[0].reserve = 0;
-            request->DiskPage_data.diskStruct[0].total_size = zvol->total_gb;
-            request->DiskPage_data.diskStruct[0].used_size = zvol->written_gb;
-            request->DiskPage_data.diskStruct[0].temp = zvol->temperature;
+            request->DiskPage_data.diskStruct[0].total_size = pools[(order - 1) * 2].total_size;
+            request->DiskPage_data.diskStruct[0].used_size = pools[(order - 1) * 2].used_size;
+            request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
             //reserve name
-            for (int i = 0; i < sizeof(zvol->name); i++)
+            for (int i = 0; i < sizeof(pools[(order - 1) * 2].name); i++)
             {
-                request->DiskPage_data.diskStruct[0].name[i] = zvol->name[i];
+                request->DiskPage_data.diskStruct[0].name[i] = pools[(order - 1) * 2].name[i];
             }
-            request->DiskPage_data.diskStruct[0].name[sizeof(zvol->name) + 1] = 0;
+            request->DiskPage_data.diskStruct[0].name[sizeof(pools[(order - 1) * 2].name) + 1] = 0;
             request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
         }
         else
         {
             //First
-            zvol = &all_zvols->all_zvols[(order - 1) * 2];
             request->DiskPage_data.count = 2;
-            request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2;//id >= 0
+            request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
             request->DiskPage_data.diskStruct[0].unit = 0x33;
             request->DiskPage_data.diskStruct[0].reserve = 0;
-            request->DiskPage_data.diskStruct[0].total_size = zvol->total_gb;
-            request->DiskPage_data.diskStruct[0].used_size = zvol->written_gb;
-            request->DiskPage_data.diskStruct[0].temp = zvol->temperature;
-            for (int i = 0; i < sizeof(zvol->name); i++)
+            request->DiskPage_data.diskStruct[0].total_size = pools[(order - 1) * 2].total_size;
+            request->DiskPage_data.diskStruct[0].used_size = pools[(order - 1) * 2].used_size;
+            request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
+            //reserve name
+            for (int i = 0; i < sizeof(pools[(order - 1) * 2].name); i++)
             {
-                request->DiskPage_data.diskStruct[0].name[i] = zvol->name[i];
+                request->DiskPage_data.diskStruct[0].name[i] = pools[(order - 1) * 2].name[i];
             }
-            request->DiskPage_data.diskStruct[0].name[sizeof(zvol->name) + 1] = 0;
+            request->DiskPage_data.diskStruct[0].name[sizeof(pools[(order - 1) * 2].name) + 1] = 0;
             request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
             //Second
-            zvol = &all_zvols->all_zvols[(order - 1) * 2 + 1];
             request->DiskPage_data.diskStruct[1].disk_id = 1 + (order - 1) * 2;
             request->DiskPage_data.diskStruct[1].unit = 0x33;
             request->DiskPage_data.diskStruct[1].reserve = 0;
-            request->DiskPage_data.diskStruct[1].total_size = zvol->total_gb;
-            request->DiskPage_data.diskStruct[1].used_size = zvol->written_gb;
-            request->DiskPage_data.diskStruct[1].temp = zvol->temperature;
-            for (int i = 0; i < sizeof(zvol->name); i++)
+            request->DiskPage_data.diskStruct[1].total_size = pools[(order - 1) * 2 + 1].total_size;
+            request->DiskPage_data.diskStruct[1].used_size = pools[(order - 1) * 2 + 1].used_size;
+            request->DiskPage_data.diskStruct[1].temp = pools[(order - 1) * 2 + 1].highest_temp;
+            for (int i = 0; i < sizeof(pools[(order - 1) * 2 + 1].name); i++)
             {
-                request->DiskPage_data.diskStruct[1].name[i] = zvol->name[i];
+                request->DiskPage_data.diskStruct[1].name[i] = pools[(order - 1) * 2 + 1].name[i];
             }
-            request->DiskPage_data.diskStruct[1].name[sizeof(zvol->name) + 1] = 0;
+            request->DiskPage_data.diskStruct[1].name[sizeof(pools[(order - 1) * 2 + 1].name) + 1] = 0;
             request->DiskPage_data.diskStruct[1].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
         }
         return offsetof(Request, DiskPage_data.crc) + 1;
@@ -1517,561 +1510,428 @@ unsigned int get_memory_usage(){
 //     printf("[debug] ack->err: %x\n", ack->err);
 // }
 //Disk
-int file_exists(const char *filename) {
-    struct stat st;
-    return (stat(filename, &st) == 0);
-}
-// 读取文件内容到缓冲区
-int read_file(const char *filename, char *buffer, size_t buffer_size) {
-    FILE *file = fopen(filename, "r");
-    if (!file) return -1;
-    
-    size_t bytes_read = fread(buffer, 1, buffer_size - 1, file);
-    buffer[bytes_read] = '\0';
-    fclose(file);
-    return 0;
-}
-char* my_strtok_r(char* str, const char* delim, char** saveptr) {
-    char* token;
-    
-    if (str != NULL) {
-        *saveptr = str;
+int execute_command(const char* command, char* output, size_t output_size) {
+    if (command == NULL || output == NULL || output_size == 0) {
+        return -1;
     }
     
-    if (*saveptr == NULL) {
-        return NULL;
+    FILE* fp = popen(command, "r");
+    if (fp == NULL) {
+        return -1;
     }
     
-    /* 跳过前导分隔符 */
-    *saveptr += strspn(*saveptr, delim);
-    if (**saveptr == '\0') {
-        return NULL;
+    output[0] = '\0';
+    size_t total_read = 0;
+    char buffer[256];
+    
+    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        size_t len = strlen(buffer);
+        if (total_read + len < output_size - 1) {
+            strcat(output, buffer);
+            total_read += len;
+        } else {
+            break;
+        }
     }
     
-    /* 找到下一个分隔符 */
-    token = *saveptr;
-    *saveptr = strpbrk(token, delim);
-    if (*saveptr != NULL) {
-        **saveptr = '\0';
-        (*saveptr)++;
-    }
-    
-    return token;
+    int status = pclose(fp);
+    return WEXITSTATUS(status);
 }
 
-void trim_newline(char* str) {
-    if (str == NULL) return;
-    
-    size_t len = strlen(str);
-    if (len > 0 && str[len-1] == '\n') {
-        str[len-1] = '\0';
+void trim_string(char* str) {
+    if (str == NULL || *str == '\0') {
+        return;
     }
-}
-
-void trim_whitespace(char* str) {
-    if (str == NULL) return;
     
     char* start = str;
-    while (isspace((unsigned char)*start)) start++;
+    char* end;
+    
+    while (*start && isspace((unsigned char)*start)) {
+        start++;
+    }
     
     if (*start == '\0') {
         str[0] = '\0';
         return;
     }
     
-    char* end = start + strlen(start) - 1;
-    while (end > start && isspace((unsigned char)*end)) end--;
+    end = start + strlen(start) - 1;
+    while (end > start && isspace((unsigned char)*end)) {
+        end--;
+    }
     
     *(end + 1) = '\0';
     
     if (start != str) {
-        memmove(str, start, strlen(start) + 1);
+        memmove(str, start, end - start + 2);
     }
 }
 
-void safe_strncpy(char* dest, const char* src, size_t dest_size) {
-    if (dest == NULL || src == NULL || dest_size == 0) return;
-    
-    size_t src_len = strlen(src);
-    if (src_len >= dest_size) {
-        src_len = dest_size - 1;
-    }
-    
-    memcpy(dest, src, src_len);
-    dest[src_len] = '\0';
+int file_exists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0;
 }
 
-unsigned long long parse_size_with_unit(const char* size_str) {
-    if (size_str == NULL || strlen(size_str) == 0) {
-        return 0;
-    }
-    
-    char* endptr;
-    double value = strtod(size_str, &endptr);
-    
-    if (endptr == size_str) {
-        return 0;
-    }
-    
-    if (strstr(size_str, "K") != NULL || strstr(size_str, "k") != NULL) {
-        return (unsigned long long)(value * 1024);
-    } else if (strstr(size_str, "M") != NULL || strstr(size_str, "m") != NULL) {
-        return (unsigned long long)(value * 1024 * 1024);
-    } else if (strstr(size_str, "G") != NULL || strstr(size_str, "g") != NULL) {
-        return (unsigned long long)(value * 1024 * 1024 * 1024);
-    } else if (strstr(size_str, "T") != NULL || strstr(size_str, "t") != NULL) {
-        return (unsigned long long)(value * 1024 * 1024 * 1024 * 1024);
-    } else {
-        return (unsigned long long)value;
-    }
-}
-
-double bytes_to_gb(unsigned long long bytes) {
-    return bytes / (1024.0 * 1024.0 * 1024.0);
-}
-
-double calculate_percentage(unsigned long long part, unsigned long long total) {
-    if (total == 0) return 0.0;
-    return (double)part / (double)total * 100.0;
-}
-
-int execute_command(const char* cmd, char* buffer, size_t buffer_size) {
-    if (cmd == NULL || buffer == NULL || buffer_size == 0) {
+int read_file(const char* path, char* buffer, size_t buffer_size) {
+    if (!file_exists(path) || buffer == NULL || buffer_size == 0) {
         return -1;
     }
     
-    FILE* fp = popen(cmd, "r");
-    if (fp == NULL) {
-        fprintf(stderr, "Failed to execute command: %s\n", cmd);
-        buffer[0] = '\0';
+    FILE* file = fopen(path, "r");
+    if (file == NULL) {
         return -1;
     }
     
-    size_t bytes_read = 0;
-    size_t total_read = 0;
-    
-    while (!feof(fp) && total_read < buffer_size - 1) {
-        bytes_read = fread(buffer + total_read, 1, buffer_size - 1 - total_read, fp);
-        total_read += bytes_read;
+    if (fgets(buffer, buffer_size, file) == NULL) {
+        fclose(file);
+        return -1;
     }
     
-    buffer[total_read] = '\0';
-    
-    int status = pclose(fp);
-    return status;
+    fclose(file);
+    trim_string(buffer);
+    return 0;
 }
 
-/* ==================== 主要功能函数实现 ==================== */
-
-int get_non_system_pools(PoolInfo* pools, int max_pools) {
-    char buffer[4096];
-    int pool_count = 0;
-    
-    /* 获取所有存储池 */
-    if (execute_command("zpool list -H -o name,guid", buffer, sizeof(buffer)) != 0) {
-        fprintf(stderr, "Failed to get zpool list\n");
-        return 0;
-    }
-    
-    /* 使用线程安全的字符串分割 */
-    char* saveptr = NULL;
-    char* line = my_strtok_r(buffer, "\n", &saveptr);
-    
-    while (line != NULL && pool_count < max_pools) {
-        /* 复制行内容，避免修改原始数据 */
-        char line_copy[512];
-        strcpy(line_copy, line);
-        
-        char* tab_pos = strchr(line_copy, '\t');
-        if (tab_pos != NULL) {
-            *tab_pos = '\0';
-            
-            char* pool_name = line_copy;
-            char* pool_guid = tab_pos + 1;
-            
-            trim_whitespace(pool_name);
-            trim_whitespace(pool_guid);
-            
-            /* 排除系统池 */
-            if (strcmp(pool_name, "boot-pool") != 0 &&
-                strcmp(pool_name, "freenas-boot") != 0 &&
-                strcmp(pool_name, "system") != 0 &&
-                strlen(pool_name) > 0) {
-                
-                safe_strncpy(pools[pool_count].name, pool_name, sizeof(pools[pool_count].name));
-                safe_strncpy(pools[pool_count].guid, pool_guid, sizeof(pools[pool_count].guid));
-                pools[pool_count].zvol_count = 0;
-                pools[pool_count].disk_uuids[0] = '\0';
-                
-                pool_count++;
-            }
-        }
-        
-        line = my_strtok_r(NULL, "\n", &saveptr);
-    }
-    
-    return pool_count;
-}
-
-void get_pool_disk_uuids(const char* pool_name, char* disk_uuids, size_t buffer_size) {
-    if (pool_name == NULL || disk_uuids == NULL || buffer_size == 0) {
-        return;
-    }
-    
-    char buffer[8192];
-    char cmd[512];
-    
-    /* 获取zpool状态 */
-    snprintf(cmd, sizeof(cmd), "zpool status %s", pool_name);
-    execute_command(cmd, buffer, sizeof(buffer));
-    
-    disk_uuids[0] = '\0';
-    
-    /* 使用线程安全的方式解析 */
-    char* saveptr = NULL;
-    char* line = my_strtok_r(buffer, "\n", &saveptr);
-    int first_uuid = 1;
-    
-    while (line != NULL) {
-        trim_whitespace(line);
-        
-        /* 查找UUID */
-        for (int i = 0; line[i] != '\0'; i++) {
-            if (line[i] == '-' && i >= 8) {
-                int valid_uuid = 1;
-                for (int j = 0; j < 36; j++) {
-                    int pos = i - 8 + j;
-                    if (pos >= (int)strlen(line)) {
-                        valid_uuid = 0;
-                        break;
-                    }
-                    
-                    char c = line[pos];
-                    if (j == 8 || j == 13 || j == 18 || j == 23) {
-                        if (c != '-') valid_uuid = 0;
-                    } else if (!isxdigit(c)) {
-                        valid_uuid = 0;
-                    }
-                }
-                
-                if (valid_uuid) {
-                    char uuid[37];
-                    strncpy(uuid, &line[i-8], 36);
-                    uuid[36] = '\0';
-                    
-                    if (!first_uuid) {
-                        if (strlen(disk_uuids) + 3 < buffer_size) {
-                            strcat(disk_uuids, "; ");
-                        }
-                    }
-                    
-                    if (strlen(disk_uuids) + strlen(uuid) < buffer_size) {
-                        strcat(disk_uuids, uuid);
-                        first_uuid = 0;
-                    }
-                    
-                    break;
-                }
-            }
-        }
-        
-        line = my_strtok_r(NULL, "\n", &saveptr);
-    }
-    
-    if (strlen(disk_uuids) == 0) {
-        safe_strncpy(disk_uuids, "Unknown", buffer_size);
-    }
-}
-
-void get_zvol_creation_time(const char* zvol_path, char* create_time, size_t buffer_size) {
-    if (zvol_path == NULL || create_time == NULL || buffer_size == 0) {
-        safe_strncpy(create_time, "Unknown", buffer_size);
-        return;
-    }
-    
-    char buffer[256];
-    char cmd[512];
-    
-    snprintf(cmd, sizeof(cmd), "zfs get -H -o value creation %s", zvol_path);
-    execute_command(cmd, buffer, sizeof(buffer));
-    
-    trim_whitespace(buffer);
-    
-    if (strlen(buffer) > 0 && strcmp(buffer, "-") != 0) {
-        /* 只取日期部分 */
-        char* space_pos = strchr(buffer, ' ');
-        if (space_pos != NULL) {
-            *space_pos = '\0';
-        }
-        safe_strncpy(create_time, buffer, buffer_size);
-    } else {
-        safe_strncpy(create_time, "Unknown", buffer_size);
-    }
-}
-
-void get_zvol_written_data(const char* zvol_path, unsigned long long* written_bytes) {
-    *written_bytes = 0;
-    
-    if (zvol_path == NULL) return;
-    
-    char buffer[256];
-    char cmd[512];
-    
-    /* 尝试获取written属性 */
-    snprintf(cmd, sizeof(cmd), "zfs get -H -o value written %s", zvol_path);
-    execute_command(cmd, buffer, sizeof(buffer));
-    trim_whitespace(buffer);
-    
-    if (strlen(buffer) > 0 && strcmp(buffer, "-") != 0) {
-        *written_bytes = parse_size_with_unit(buffer);
-        return;
-    }
-    
-    /* 尝试referenced属性 */
-    snprintf(cmd, sizeof(cmd), "zfs get -H -o value referenced %s", zvol_path);
-    execute_command(cmd, buffer, sizeof(buffer));
-    trim_whitespace(buffer);
-    
-    if (strlen(buffer) > 0 && strcmp(buffer, "-") != 0) {
-        *written_bytes = parse_size_with_unit(buffer);
-        return;
-    }
-    
-    /* 最后尝试used属性 */
-    snprintf(cmd, sizeof(cmd), "zfs get -H -o value used %s", zvol_path);
-    execute_command(cmd, buffer, sizeof(buffer));
-    trim_whitespace(buffer);
-    
-    if (strlen(buffer) > 0 && strcmp(buffer, "-") != 0) {
-        *written_bytes = parse_size_with_unit(buffer);
-    }
-}
-
-int get_zvols_for_pool(const char* pool_name, const char* disk_uuids, ZvolInfo* zvols, int max_zvols) {
-    if (pool_name == NULL || zvols == NULL) {
-        return 0;
-    }
-    
-    char buffer[32768];  /* 更大的缓冲区 */
-    char cmd[512];
-    int zvol_count = 0;
-    
-    /* 获取存储池的所有ZVOL */
-    snprintf(cmd, sizeof(cmd), "zfs list -t volume -H -o name,volsize -r %s", pool_name);
-    
-    if (execute_command(cmd, buffer, sizeof(buffer)) != 0) {
-        fprintf(stderr, "Failed to get ZVOL list for pool %s\n", pool_name);
-        return 0;
-    }
-    
-    printf("Raw output for pool %s:\n%s\n", pool_name, buffer);
-    
-    /* 使用线程安全的方式解析 */
-    char* saveptr = NULL;
-    char* line = my_strtok_r(buffer, "\n", &saveptr);
-    
-    while (line != NULL && zvol_count < max_zvols) {
-        /* 复制行内容 */
-        char line_copy[512];
-        strcpy(line_copy, line);
-        
-        char* tab_pos = strchr(line_copy, '\t');
-        if (tab_pos != NULL) {
-            *tab_pos = '\0';
-            
-            char* zvol_path = line_copy;
-            char* volsize_str = tab_pos + 1;
-            
-            trim_whitespace(zvol_path);
-            trim_whitespace(volsize_str);
-            
-            /* 排除存储池本身 */
-            if (strcmp(zvol_path, pool_name) != 0) {
-                printf("Found ZVOL: %s\n", zvol_path);
-                
-                /* 提取ZVOL名称 */
-                char* slash = strrchr(zvol_path, '/');
-                char zvol_name[256];
-                if (slash != NULL) {
-                    strcpy(zvol_name, slash + 1);
-                } else {
-                    strcpy(zvol_name, zvol_path);
-                }
-                
-                /* 获取volsize */
-                unsigned long long volsize_bytes = parse_size_with_unit(volsize_str);
-                
-                /* 获取Data Written */
-                unsigned long long written_bytes = 0;
-                get_zvol_written_data(zvol_path, &written_bytes);
-                
-                /* 获取创建时间 */
-                char create_time[64];
-                get_zvol_creation_time(zvol_path, create_time, sizeof(create_time));
-                
-                /* 填充ZVOL信息 */
-                safe_strncpy(zvols[zvol_count].name, zvol_name, sizeof(zvols[zvol_count].name));
-                safe_strncpy(zvols[zvol_count].full_path, zvol_path, sizeof(zvols[zvol_count].full_path));
-                safe_strncpy(zvols[zvol_count].parent_pool, pool_name, sizeof(zvols[zvol_count].parent_pool));
-                safe_strncpy(zvols[zvol_count].disk_uuids, disk_uuids, sizeof(zvols[zvol_count].disk_uuids));
-                safe_strncpy(zvols[zvol_count].create_time, create_time, sizeof(zvols[zvol_count].create_time));
-                
-                char *partuuid = zvols[zvol_count].disk_uuids;
-                
-                char *device_path = find_device_by_partuuid(partuuid);
-                if (device_path == NULL) {
-                    printf("Can not find PARTUUID\n");
-                    return 1;
-                }
-                char *disk_name = extract_disk_name(device_path);
-                if (disk_name == NULL) {
-                    printf("Can not find disk name\n");
-                    free(device_path);
-                    return 1;
-                }
-                zvols[zvol_count].temperature = get_disk_temperature(disk_name);
-                zvols[zvol_count].total_gb = bytes_to_gb(volsize_bytes);
-                zvols[zvol_count].written_gb = bytes_to_gb(written_bytes);
-                zvols[zvol_count].usage_percent = calculate_percentage(written_bytes, volsize_bytes);
-                
-                printf("  Added: %s (Size: %llu bytes, Written: %llu bytes)\n", 
-                       zvol_name, volsize_bytes, written_bytes);
-                
-                zvol_count++;
-            }
-        }
-        
-        line = my_strtok_r(NULL, "\n", &saveptr);
-    }
-    
-    return zvol_count;
-}
-char* extract_disk_name(const char *device_path) {
+char* extract_disk_name(const char* device_path) {
     if (device_path == NULL) {
         return NULL;
     }
     
-    // 复制输入字符串以避免修改原数据
-    char *path = strdup(device_path);
-    if (path == NULL) {
+    const char* slash = strrchr(device_path, '/');
+    if (slash == NULL) {
+        return strdup(device_path);
+    }
+    
+    const char* name = slash + 1;
+    char* result = strdup(name);
+    if (result == NULL) {
         return NULL;
     }
     
-    // 找到最后一个 '/' 的位置
-    char *base = strrchr(path, '/');
-    if (base == NULL) {
-        base = path;  // 如果没有 '/'，使用整个字符串
+    if (strncmp(result, "nvme", 4) == 0) {
+        char* p = strrchr(result, 'p');
+        if (p != NULL && isdigit((unsigned char)*(p+1))) {
+            *p = '\0';
+        }
     } else {
-        base++;  // 跳过 '/'
-    }
-    
-    char *result = NULL;
-    
-    // 处理 NVMe 设备 (如 /dev/nvme0n1p1)
-    if (strncmp(base, "nvme", 4) == 0) {
-        char *p = base;
-        // 找到 'p' 的位置（分区标识）
-        while (*p && *p != 'p') {
+        char* p = result;
+        while (*p && !isdigit((unsigned char)*p)) {
             p++;
         }
-        if (*p == 'p') {
-            *p = '\0';  // 截断字符串，去掉分区部分
-            result = strdup(base);
+        if (*p) {
+            *p = '\0';
         }
-    }
-    // 处理 MMC/SD 设备 (如 /dev/mmcblk0p1)
-    else if (strncmp(base, "mmcblk", 6) == 0) {
-        char *p = base;
-        // 找到 'p' 的位置
-        while (*p && *p != 'p') {
-            p++;
-        }
-        if (*p == 'p') {
-            *p = '\0';  // 截断字符串
-            result = strdup(base);
-        }
-    }
-    // 处理标准 SATA/SCSI 设备 (如 /dev/sda1, /dev/sdb2)
-    else if ((base[0] == 's' || base[0] == 'h' || base[0] == 'v') && 
-             (base[1] == 'd' || base[1] == 'a')) {
-        // 找到第一个数字的位置（分区号开始处）
-        char *p = base;
-        while (*p && !(*p >= '0' && *p <= '9')) {
-            p++;
-        }
-        if (*p != '\0') {
-            // 复制到分区号之前的部分
-            int len = p - base;
-            result = (char *)malloc(len + 1);
-            if (result != NULL) {
-                strncpy(result, base, len);
-                result[len] = '\0';
-            }
-        }
-    }
-    
-    free(path);
-    
-    // 如果没有匹配到任何模式，返回原始基础名称
-    if (result == NULL) {
-        result = strdup(base);
     }
     
     return result;
 }
-void display_results(PoolInfo* pools, int pool_count) {
-    printf("\n=====================================================\n");
-    printf("                 DETAILED REPORT\n");
-    printf("=====================================================\n\n");
+
+int is_valid_device_name(const char* name) {
+    if (name == NULL || strlen(name) == 0) {
+        return 0;
+    }
     
-    for (int i = 0; i < pool_count; i++) {
-        printf("POOL: %s (GUID: %s)\n", pools[i].name, pools[i].guid);
-        printf("Disk UUIDs: %s\n", pools[i].disk_uuids);
-        printf("ZVOL Count: %d\n", pools[i].zvol_count);
-        printf("-..............................................................");
-        printf("\n");
-        
-        if (pools[i].zvol_count == 0) {
-            printf("  No ZVOLs found.\n");
+    if (strcmp(name, "NAME") == 0 ||
+        strcmp(name, "state:") == 0 ||
+        strcmp(name, "config:") == 0 ||
+        strcmp(name, "errors:") == 0 ||
+        strcmp(name, "scan:") == 0 ||
+        strcmp(name, "mirror") == 0 ||
+        strcmp(name, "raidz") == 0 ||
+        strcmp(name, "raidz1") == 0 ||
+        strcmp(name, "raidz2") == 0 ||
+        strcmp(name, "raidz3") == 0 ||
+        strcmp(name, "draid") == 0 ||
+        strcmp(name, "spare") == 0 ||
+        strcmp(name, "cache") == 0 ||
+        strcmp(name, "log") == 0 ||
+        strcmp(name, "special") == 0) {
+        return 0;
+    }
+    
+    if (strncmp(name, "sd", 2) == 0 ||
+        strncmp(name, "hd", 2) == 0 ||
+        strncmp(name, "vd", 2) == 0 ||
+        strncmp(name, "nvme", 4) == 0 ||
+        strncmp(name, "da", 2) == 0) {
+        return 1;
+    }
+    
+    if (is_uuid_format(name)) {
+        return 1;
+    }
+    
+    return 0;
+}
+
+int is_uuid_format(const char* str) {
+    if (str == NULL || strlen(str) != 36) {
+        return 0;
+    }
+    
+    for (int i = 0; i < 36; i++) {
+        char c = str[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != '-') return 0;
         } else {
-            for (int j = 0; j < pools[i].zvol_count; j++) {
-                printf("  ZVOL %d: %s\n", j+1, pools[i].zvols[j].name);
-                printf("    Path: %s\n", pools[i].zvols[j].full_path);
-                printf("    Created: %s\n", pools[i].zvols[j].create_time);
-                printf("    Total: %.2f GB\n", pools[i].zvols[j].total_gb);
-                printf("    Temperature: %d\n", pools[i].zvols[j].temperature);
-                printf("    Written: %.2f GB\n", pools[i].zvols[j].written_gb);
-                printf("    Usage: %.1f%%\n", pools[i].zvols[j].usage_percent);
-                printf("\n");
+            if (!isxdigit((unsigned char)c)) return 0;
+        }
+    }
+    
+    return 1;
+}
+
+unsigned long long parse_size(const char* size_str) {
+    unsigned long long value = 0;
+    char unit = 0;
+    double float_value = 0.0;
+    
+    if (sscanf(size_str, "%lf%c", &float_value, &unit) == 2) {
+        value = (unsigned long long)(float_value + 0.5);
+    } else if (sscanf(size_str, "%llu%c", &value, &unit) == 2) {
+        // 已经是整数
+    } else if (sscanf(size_str, "%llu", &value) == 1) {
+        return value;
+    } else {
+        return 0;
+    }
+    
+    switch (toupper(unit)) {
+        case 'K': return value * 1024ULL;
+        case 'M': return value * 1024ULL * 1024ULL;
+        case 'G': return value * 1024ULL * 1024ULL * 1024ULL;
+        case 'T': return value * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+        default:  return value;
+    }
+}
+
+// ==================== 核心功能函数实现 ====================
+
+int get_all_pools(PoolInfo* pools, int max_pools) {
+    char command[MAX_COMMAND];
+    char output[MAX_OUTPUT];
+    int count = 0;
+    
+    // 简单的命令，不需要检查长度
+    snprintf(command, sizeof(command), "zpool list -H -o name 2>/dev/null");
+    
+    if (execute_command(command, output, sizeof(output)) != 0) {
+        return 0;
+    }
+    
+    char* line = strtok(output, "\n");
+    while (line != NULL && count < max_pools) {
+        trim_string(line);
+        
+        if (strlen(line) > 0) {
+            // 安全复制池名
+            strncpy(pools[count].name, line, sizeof(pools[count].name) - 1);
+            pools[count].name[sizeof(pools[count].name) - 1] = '\0';
+            
+            pools[count].total_size = 0;
+            pools[count].used_size = 0;
+            pools[count].free_size = 0;
+            pools[count].disk_count = 0;
+            pools[count].highest_temp = -1;
+            
+            count++;
+        }
+        
+        line = strtok(NULL, "\n");
+    }
+    
+    return count;
+}
+
+int get_pool_info(PoolInfo* pool) {
+    if (pool == NULL) {
+        return -1;
+    }
+    
+    char command[MAX_COMMAND];
+    char output[MAX_OUTPUT];
+    
+    // 检查池名长度是否安全
+    int required_len = snprintf(NULL, 0, 
+                               "zpool list -H -o size,allocated,free %s 2>/dev/null", 
+                               pool->name);
+    
+    if (required_len >= (int)sizeof(command)) {
+        fprintf(stderr, "Error: Pool name too long for command: %s\n", pool->name);
+        return -1;
+    }
+    
+    snprintf(command, sizeof(command), 
+             "zpool list -H -o size,allocated,free %s 2>/dev/null", 
+             pool->name);
+    
+    if (execute_command(command, output, sizeof(output)) != 0) {
+        return -1;
+    }
+    
+    char size_str[64], alloc_str[64], free_str[64];
+    if (sscanf(output, "%63s %63s %63s", size_str, alloc_str, free_str) != 3) {
+        return -1;
+    }
+    
+    pool->total_size = parse_size(size_str);
+    pool->used_size = parse_size(alloc_str);
+    pool->free_size = parse_size(free_str);
+    
+    return 0;
+}
+
+int get_pool_disks_and_partuuids(PoolInfo* pool) {
+    if (pool == NULL) {
+        return 0;
+    }
+    
+    char command[MAX_COMMAND];
+    char output[MAX_OUTPUT];
+    
+    // 检查池名长度是否安全
+    int required_len = snprintf(NULL, 0, 
+                               "zpool status %s 2>/dev/null", 
+                               pool->name);
+    
+    if (required_len >= (int)sizeof(command)) {
+        fprintf(stderr, "Error: Pool name too long for command: %s\n", pool->name);
+        return 0;
+    }
+    
+    snprintf(command, sizeof(command), "zpool status %s 2>/dev/null", pool->name);
+    
+    if (execute_command(command, output, sizeof(output)) != 0) {
+        return 0;
+    }
+    
+    pool->disk_count = 0;
+    
+    char* saveptr;
+    char* line = strtok_r(output, "\n", &saveptr);
+    int in_config_section = 0;
+    int after_config_header = 0;
+    
+    while (line != NULL && pool->disk_count < MAX_DISKS_PER_POOL) {
+        trim_string(line);
+        
+        if (strcmp(line, "config:") == 0) {
+            in_config_section = 1;
+            line = strtok_r(NULL, "\n", &saveptr);
+            continue;
+        }
+        
+        if (in_config_section && strlen(line) == 0) {
+            in_config_section = 0;
+        }
+        
+        if (in_config_section) {
+            if (strstr(line, "NAME") != NULL && strstr(line, "STATE") != NULL) {
+                after_config_header = 1;
+                line = strtok_r(NULL, "\n", &saveptr);
+                continue;
+            }
+            
+            if (after_config_header) {
+                // 安全比较池名
+                size_t pool_name_len = strlen(pool->name);
+                size_t line_len = strlen(line);
+                
+                if (strcmp(line, pool->name) == 0 || 
+                    (line_len >= pool_name_len && 
+                     strncmp(line, pool->name, pool_name_len) == 0)) {
+                    line = strtok_r(NULL, "\n", &saveptr);
+                    continue;
+                }
+                
+                char device_name[MAX_PATH];
+                if (sscanf(line, "%255s", device_name) == 1) {
+                    if (is_valid_device_name(device_name)) {
+                        DiskInfo* disk = &pool->disks[pool->disk_count];
+                        
+                        strncpy(disk->name, device_name, sizeof(disk->name) - 1);
+                        disk->name[sizeof(disk->name) - 1] = '\0';
+                        
+                        // 获取 PARTUUID
+                        char partuuid_cmd[MAX_COMMAND];
+                        char partuuid_output[MAX_PATH];
+                        char partuuid[MAX_PATH] = "";
+                        
+                        if (is_uuid_format(device_name)) {
+                            strncpy(partuuid, device_name, sizeof(partuuid) - 1);
+                            partuuid[sizeof(partuuid) - 1] = '\0';
+                        } else {
+                            // 检查设备名长度是否安全
+                            int cmd_required_len = snprintf(NULL, 0,
+                                                          "blkid /dev/%s 2>/dev/null | grep -o 'PARTUUID=\"[^\"]*\"' | cut -d'\"' -f2",
+                                                          device_name);
+                            
+                            if (cmd_required_len < (int)sizeof(partuuid_cmd)) {
+                                snprintf(partuuid_cmd, sizeof(partuuid_cmd),
+                                        "blkid /dev/%s 2>/dev/null | grep -o 'PARTUUID=\"[^\"]*\"' | cut -d'\"' -f2",
+                                        device_name);
+                                
+                                if (execute_command(partuuid_cmd, partuuid_output, sizeof(partuuid_output)) == 0) {
+                                    trim_string(partuuid_output);
+                                    if (strlen(partuuid_output) > 0) {
+                                        strncpy(partuuid, partuuid_output, sizeof(partuuid) - 1);
+                                        partuuid[sizeof(partuuid) - 1] = '\0';
+                                    }
+                                }
+                            }
+                        }
+                        
+                        strncpy(disk->partuuid, partuuid, sizeof(disk->partuuid) - 1);
+                        disk->partuuid[sizeof(disk->partuuid) - 1] = '\0';
+                        
+                        disk->device_path[0] = '\0';
+                        disk->disk_name[0] = '\0';
+                        disk->temperature = -1;
+                        
+                        pool->disk_count++;
+                    }
+                }
             }
         }
         
-        printf("\n");
+        line = strtok_r(NULL, "\n", &saveptr);
     }
+    
+    return pool->disk_count;
 }
-// 函数：通过UUID查找设备路径
+
 char* find_device_by_partuuid(const char *partuuid) {
-    char command[512];
+    if (partuuid == NULL || strlen(partuuid) == 0) {
+        return NULL;
+    }
+    
+    char command[MAX_COMMAND];
     char *device_path = NULL;
     FILE *fp;
     
-    // 构建命令
+    // 检查 PARTUUID 长度是否安全
+    int required_len = snprintf(NULL, 0,
+                               "blkid | grep 'PARTUUID=\"%s\"' | cut -d: -f1",
+                               partuuid);
+    
+    if (required_len >= (int)sizeof(command)) {
+        fprintf(stderr, "Error: PARTUUID too long for command\n");
+        return NULL;
+    }
+    
     snprintf(command, sizeof(command), 
              "blkid | grep 'PARTUUID=\"%s\"' | cut -d: -f1", 
              partuuid);
     
-    // 执行命令
     fp = popen(command, "r");
     if (fp == NULL) {
-        perror("popen failed");
         return NULL;
     }
     
-    // 读取命令输出
-    char buffer[256];
+    char buffer[MAX_PATH];
     if (fgets(buffer, sizeof(buffer), fp) != NULL) {
-        // 去除换行符
         buffer[strcspn(buffer, "\n")] = 0;
+        trim_string(buffer);
         if (strlen(buffer) > 0) {
             device_path = strdup(buffer);
         }
@@ -2081,7 +1941,6 @@ char* find_device_by_partuuid(const char *partuuid) {
     return device_path;
 }
 
-// 函数：获取磁盘温度
 int get_disk_temperature(const char *device) {
     char path[MAX_PATH];
     char temp_value[32];
@@ -2142,58 +2001,142 @@ int get_disk_temperature(const char *device) {
     
     return -1; // 无法获取温度
 }
-int get_total_zvols_count() {
-    int count = 0;
-    for (int i = 0; i < pool_count; i++) {
-        count += pools[i].zvol_count;
-    }
-    return count;
-}
-AllZvols* merge_all_zvols() {
-    // 1. 计算总共的ZVOL数量
-    int total_count = get_total_zvols_count();
-    
-    if (total_count == 0) {
-        printf("Can not find any Zvol\n");
-        return NULL;
+
+int update_pool_temperatures(PoolInfo* pool) {
+    if (pool == NULL || pool->disk_count == 0) {
+        return 0;
     }
     
-    // 2. 分配内存给新结构体
-    AllZvols* all_zvols = (AllZvols*)malloc(sizeof(AllZvols));
-    if (all_zvols == NULL) {
-        perror("分配AllZvols结构体内存失败");
-        return NULL;
-    }
+    int got_temperature = 0;
+    pool->highest_temp = -1;
     
-    // 3. 分配内存给ZVOL数组
-    all_zvols->all_zvols = (ZvolInfo*)malloc(total_count * sizeof(ZvolInfo));
-    if (all_zvols->all_zvols == NULL) {
-        perror("分配ZVOL数组内存失败");
-        free(all_zvols);
-        return NULL;
-    }
+    printf("Getting disk temperatures...\n");
     
-    // 4. 设置总ZVOL数量
-    all_zvols->total_zvols = total_count;
-    
-    // 5. 复制所有ZVOL数据
-    int current_index = 0;
-    for (int i = 0; i < pool_count; i++) {
-        PoolInfo* pool = &pools[i];
-        for (int j = 0; j < pool->zvol_count; j++) {
-            // 使用memcpy复制整个ZvolInfo结构
-            memcpy(&all_zvols->all_zvols[current_index], 
-                   &pool->zvols[j], 
-                   sizeof(ZvolInfo));
-            current_index++;
+    for (int i = 0; i < pool->disk_count; i++) {
+        DiskInfo* disk = &pool->disks[i];
+        
+        if (strlen(disk->partuuid) > 0) {
+            char* device_path = find_device_by_partuuid(disk->partuuid);
+            if (device_path != NULL) {
+                strncpy(disk->device_path, device_path, sizeof(disk->device_path) - 1);
+                disk->device_path[sizeof(disk->device_path) - 1] = '\0';
+                
+                char* disk_name = extract_disk_name(disk->device_path);
+                if (disk_name != NULL) {
+                    strncpy(disk->disk_name, disk_name, sizeof(disk->disk_name) - 1);
+                    disk->disk_name[sizeof(disk->disk_name) - 1] = '\0';
+                    
+                    disk->temperature = get_disk_temperature(disk->disk_name);
+                    if (disk->temperature >= 0) {
+                        got_temperature = 1;
+                        if (disk->temperature > pool->highest_temp) {
+                            pool->highest_temp = disk->temperature;
+                        }
+                        printf("  Disk %s: %d°C (via PARTUUID %s)\n", 
+                               disk->disk_name, disk->temperature, disk->partuuid);
+                        free(disk_name);
+                        free(device_path);
+                        continue;
+                    }
+                    free(disk_name);
+                }
+                free(device_path);
+            }
+        }
+        
+        if (disk->temperature < 0 && strlen(disk->name) > 0) {
+            if (!is_uuid_format(disk->name)) {
+                strncpy(disk->disk_name, disk->name, sizeof(disk->disk_name) - 1);
+                disk->disk_name[sizeof(disk->disk_name) - 1] = '\0';
+                
+                char* base_disk_name = extract_disk_name(disk->disk_name);
+                if (base_disk_name != NULL) {
+                    disk->temperature = get_disk_temperature(base_disk_name);
+                    free(base_disk_name);
+                } else {
+                    disk->temperature = get_disk_temperature(disk->disk_name);
+                }
+                
+                if (disk->temperature >= 0) {
+                    got_temperature = 1;
+                    if (disk->temperature > pool->highest_temp) {
+                        pool->highest_temp = disk->temperature;
+                    }
+                    printf("  Disk %s: %d°C (direct)\n", disk->disk_name, disk->temperature);
+                }
+            }
+        }
+        
+        if (disk->temperature < 0) {
+            printf("  Disk %s: Temperature not available\n", disk->name);
         }
     }
     
-    printf("Success merge %d ZVOL to new struct\n", total_count);
-    return all_zvols;
+    return got_temperature;
 }
 
-
+void display_pool_info(const PoolInfo* pool) {
+    if (pool == NULL) {
+        return;
+    }
+    
+    printf("\n=== Pool Summary: %s ===\n", pool->name);
+    
+    double total_gb = pool->total_size / 1073741824.0;
+    double used_gb = pool->used_size / 1073741824.0;
+    double free_gb = pool->free_size / 1073741824.0;
+    
+    printf("Capacity Information:\n");
+    printf("  Total Size: %.2f GB\n", total_gb);
+    printf("  Used Size:  %.2f GB\n", used_gb);
+    printf("  Free Size:  %.2f GB\n", free_gb);
+    
+    if (pool->total_size > 0) {
+        double usage = 100.0 - (pool->free_size * 100.0 / pool->total_size);
+        printf("  Usage:      %.1f%%\n", usage);
+    }
+    
+    printf("\nDisk Information:\n");
+    printf("  Total Disks: %d\n", pool->disk_count);
+    
+    if (pool->disk_count > 0) {
+        printf("  Disk Details:\n");
+        for (int i = 0; i < pool->disk_count; i++) {
+            const DiskInfo* disk = &pool->disks[i];
+            printf("    Disk %d: %s", i + 1, disk->name);
+            
+            if (strlen(disk->partuuid) > 0) {
+                printf(" (PARTUUID: %s)", disk->partuuid);
+            }
+            
+            if (disk->temperature >= 0) {
+                printf(" - %d°C", disk->temperature);
+            } else {
+                printf(" - Temperature N/A");
+            }
+            printf("\n");
+        }
+    }
+    
+    printf("\nTemperature Summary:\n");
+    if (pool->highest_temp >= 0) {
+        printf("  Highest Temperature: %d°C\n", pool->highest_temp);
+        
+        if (pool->highest_temp < 40) {
+            printf("  Status: Normal (Good)\n");
+        } else if (pool->highest_temp < 50) {
+            printf("  Status: Warning (Warm)\n");
+        } else if (pool->highest_temp < 60) {
+            printf("  Status: High (Hot)\n");
+        } else {
+            printf("  Status: Critical (Overheating!)\n");
+        }
+    } else {
+        printf("  Temperature information not available\n");
+    }
+    
+    printf("==============================\n");
+}
 
 
 int GetUserCount()
@@ -2765,10 +2708,10 @@ void* hid_send_thread(void* arg) {
                 case DiskPage_AIM:
                     int disk_maxtemp = 0;
                     for (int i = 0; i < disk_count; i++) {
-                        if (all_zvols->all_zvols[i].temperature != -1) {
-                            if(disk_maxtemp < all_zvols->all_zvols[i].temperature)
+                        if (pools[i].highest_temp != -1) {
+                            if(disk_maxtemp < pools[i].highest_temp)
                             {
-                                disk_maxtemp = all_zvols->all_zvols[i].temperature;
+                                disk_maxtemp = pools[i].highest_temp;
                             }
                             int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
                             append_crc(request);
