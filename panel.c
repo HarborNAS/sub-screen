@@ -1065,6 +1065,10 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             request->WlanPage_data.wlanPage.ip[2] = (unsigned char)c;
             request->WlanPage_data.wlanPage.ip[3] = (unsigned char)d;
         }
+        for (int i = 0; i < sizeof(request->WlanPage_data.wlanPage.name); i++)
+        {
+            request->WlanPage_data.wlanPage.name[i] = get_iface->interface_name[i];
+        }
         
         return offsetof(Request, WlanPage_data.crc) + 1;
     case InfoPage_AIM:
