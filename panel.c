@@ -221,7 +221,6 @@ void cleanup_network_monitor();
 
 
 bool IsNvidiaGPU;
-int disk_count;
 char PageIndex = 0;
 
 //1Hour Count
@@ -451,10 +450,10 @@ int main(void) {
 
     int diskforcount;
     
-    if(disk_count % 2 == 0)
-        diskforcount = disk_count / 2;
+    if(pool_count % 2 == 0)
+        diskforcount = pool_count / 2;
     else
-        diskforcount = disk_count / 2 + 1;
+        diskforcount = pool_count / 2 + 1;
     int diskpage;
     for (int i = 0; i < diskforcount; i++) {
         diskpage = first_init_hidreport(request, SET, DiskPage_AIM, diskforcount, (i + 1));
@@ -804,7 +803,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
             printf("Total TX:  %.2f MB\n", tx_total);
         }
         total = tx_total + rx_total;
-
+        total *= 1024; //Change to KB
         if(total > 1024)
         {
             request->flow_data.unit += 0x01;
@@ -929,10 +928,10 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         return offsetof(Request, SystemPage_data.crc) + 1;
     case DiskPage_AIM:
         request->length += sizeof(request->DiskPage_data);
-        request->DiskPage_data.diskcount = disk_count;
+        request->DiskPage_data.diskcount = pool_count;
         request->DiskPage_data.total = total;
         request->DiskPage_data.order = order;
-        if((disk_count - (order-1)*2) == 1)
+        if((pool_count - (order-1)*2) == 1)
         {
             request->DiskPage_data.count = 1;
             request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
@@ -2566,7 +2565,7 @@ void* hid_send_thread(void* arg) {
             if(HourTimeDiv % 60 == 0)
             {
                 //1 Min Do
-                for (int i = 0; i < disk_count; i++) {
+                for (int i = 0; i < pool_count; i++) {
                     int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
                     append_crc(request);
                     if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
@@ -2707,7 +2706,7 @@ void* hid_send_thread(void* arg) {
                     break;
                 case DiskPage_AIM:
                     int disk_maxtemp = 0;
-                    for (int i = 0; i < disk_count; i++) {
+                    for (int i = 0; i < pool_count; i++) {
                         if (pools[i].highest_temp != -1) {
                             if(disk_maxtemp < pools[i].highest_temp)
                             {
