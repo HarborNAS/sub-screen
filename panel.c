@@ -371,7 +371,7 @@ int main(void) {
         }
         
         // 2.4 显示池的详细信息
-        //display_pool_info(&pools[i]);
+        display_pool_info(&pools[i]);
         
         printf("\n");
     }
@@ -1773,9 +1773,9 @@ int get_pool_info(PoolInfo* pool) {
         return -1;
     }
     
-    pool->total_size = parse_size(size_str);
-    pool->used_size = parse_size(alloc_str);
-    pool->free_size = parse_size(free_str);
+    pool->total_size = parse_size(size_str) / 1073741824;
+    pool->used_size = parse_size(alloc_str) / 1073741824;
+    pool->free_size = parse_size(free_str) / 1073741824;
     
     return 0;
 }
@@ -2081,9 +2081,9 @@ void display_pool_info(const PoolInfo* pool) {
     
     printf("\n=== Pool Summary: %s ===\n", pool->name);
     
-    double total_gb = pool->total_size / 1073741824.0;
-    double used_gb = pool->used_size / 1073741824.0;
-    double free_gb = pool->free_size / 1073741824.0;
+    double total_gb = pool->total_size;
+    double used_gb = pool->used_size;
+    double free_gb = pool->free_size;
     
     printf("Capacity Information:\n");
     printf("  Total Size: %.2f GB\n", total_gb);
