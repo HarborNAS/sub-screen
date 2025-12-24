@@ -174,10 +174,11 @@ char* find_device_by_partuuid(const char* partuuid);
 int get_disk_temperature(const char* disk_name);
 int update_pool_temperatures(PoolInfo* pool);
 void display_pool_info(const PoolInfo* pool);
-
+void check_and_update_pools();
+void rescan_all_pools();
 PoolInfo pools[MAX_POOLS];
 int pool_count;
-
+int disk_maxtemp = 0;
 //EC6266
 int acquire_io_permissions();
 void release_io_permissions();
@@ -257,6 +258,7 @@ void get_system_info(system_info_t *info);
 
 
 
+unsigned char DGPUtemp = 0;
 
 int cpusuage,cpufan,memoryusage;
 bool Isinitial = false;
@@ -382,6 +384,7 @@ int main(void) {
         Uuused = pools[i].used_size;
         printf("Total size:%d,Used size:%d\n",Tttotal,Uuused);
     }
+
 
     //DiskPage
     #if DebugToken
@@ -678,20 +681,16 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         {
             if(IsNvidiaGPU)
             {
-                unsigned char DGPUtemp;
                 DGPUtemp = nvidia_get_gpu_temperature();
                 request->system_data.system_info.usage = nvidia_get_gpu_utilization();
                 request->system_data.system_info.temerature = DGPUtemp;
                 request->system_data.system_info.rpm = nvidia_get_gpu_fan_speed();
-                // 获取 I/O 权限
-                acquire_io_permissions();
-                ec_ram_write_byte(0xB0,DGPUtemp);
-                // 释放 I/O 权限
-                release_io_permissions();
             }
         }
         return offsetof(Request, system_data.crc) + 1;
     case Disk_AIM:
+        //update pool information
+        get_pool_info(&pools[id]);
         request->length += sizeof(request->disk_data);
         request->disk_data.disk_info.disk_id = id;
         request->disk_data.disk_info.unit = 0x33;
@@ -2106,6 +2105,7 @@ int update_pool_temperatures(PoolInfo* pool) {
             printf("  Disk %s: Temperature not available\n", disk->name);
         }
     }
+    
     return got_temperature;
 }
 
@@ -2171,7 +2171,76 @@ void display_pool_info(const PoolInfo* pool) {
     
     printf("==============================\n");
 }
-
+// 检查并更新池列表
+void check_and_update_pools() {
+    char output[MAX_OUTPUT];
+    int current_count = 0;
+    
+    // 获取当前的池数量
+    if (execute_command("zpool list -H -o name 2>/dev/null | wc -l", output, sizeof(output)) == 0) {
+        current_count = atoi(output);
+    }
+    
+    // 如果数量不一致
+    if (current_count != pool_count) {
+        // 重新扫描所有池
+        rescan_all_pools();
+        // 更新记录的数量
+        pool_count = current_count;
+    }
+    else
+    {
+        printf("Disk pools no change\n");
+    }
+}
+// 重新扫描所有池
+void rescan_all_pools() {
+    printf("rescan all pools...\n");
+    
+    // 清空现有池信息
+    memset(pools, 0, sizeof(pools));
+    pool_count = 0;
+    
+    // 重新获取所有池
+    pool_count = get_all_pools(pools, MAX_POOLS);
+    
+    if (pool_count == 0) {
+        printf("No storage pools found in the system.\n");
+        printf("Please check if ZFS is properly configured.\n");
+    }
+    else
+    {
+        for (int i = 0; i < pool_count; i++) {
+            printf("Processing pool: %s\n", pools[i].name);
+            printf("%s\n", "--------------------------------------");
+            
+            // 2.1 获取池的基本信息
+            if (get_pool_info(&pools[i]) != 0) {
+                printf("Failed to get basic information for pool %s\n", pools[i].name);
+                continue;
+            }
+            
+            // 2.2 获取池中所有磁盘及其 PARTUUID
+            int disk_count = get_pool_disks_and_partuuids(&pools[i]);
+            if (disk_count == 0) {
+                printf("No valid disks found in pool %s\n", pools[i].name);
+                continue;
+            }
+            
+            printf("Found %d disk(s) in pool %s\n", disk_count, pools[i].name);
+            
+            // 2.3 更新每个磁盘的温度信息
+            if (update_pool_temperatures(&pools[i]) == 0) {
+                printf("Warning: Failed to get temperature information for some disks\n");
+            }
+            
+            // 2.4 显示池的详细信息
+            display_pool_info(&pools[i]);
+            
+            printf("\n");
+        }
+    }
+}
 
 int GetUserCount()
 {
@@ -2667,6 +2736,65 @@ void* hid_send_thread(void* arg) {
                 #if DebugToken
                 printf("-----------------------------------WLANIPSendOK-----------------------------------\n");
                 #endif
+                //Refresh disk pools
+                check_and_update_pools();
+
+                for (int i = 0; i < pool_count; i++) 
+                {
+                    if (pools[i].highest_temp != -1)
+                    {
+                        for (int j = 0; j < pools[i].disk_count; j++)
+                        {
+                            if(pools[i].disks[j].disk_name[0] != 'n')
+                            {
+                                if(disk_maxtemp < pools[i].disks[j].temperature)
+                                {
+                                    disk_maxtemp = pools[i].disks[j].temperature;
+                                }
+                            }
+                            else
+                            {
+                                printf("Nvme SSD do not use temperature!\n");
+                            }
+                        }
+                        
+
+                    }
+                }
+                if(IsNvidiaGPU)
+                {
+                    DGPUtemp = nvidia_get_gpu_temperature();
+                    if(DGPUtemp > disk_maxtemp)
+                    {
+                        // 获取 I/O 权限
+                        acquire_io_permissions();
+                        ec_ram_write_byte(0x56,DGPUtemp);
+                        ec_ram_write_byte(0xB0,DGPUtemp);
+                        ec_ram_write_byte(0xB1,0);
+                        // 释放 I/O 权限
+                        release_io_permissions();
+                    }
+                    else
+                    {
+                        // 获取 I/O 权限
+                        acquire_io_permissions();
+                        ec_ram_write_byte(0x56,disk_maxtemp);
+                        ec_ram_write_byte(0xB0,0);
+                        ec_ram_write_byte(0xB1,disk_maxtemp);
+                        // 释放 I/O 权限
+                        release_io_permissions();
+                    }
+                }
+                else
+                {
+                    // 获取 I/O 权限
+                    acquire_io_permissions();
+                    ec_ram_write_byte(0x56,disk_maxtemp);
+                    ec_ram_write_byte(0xB0,0);
+                    ec_ram_write_byte(0xB1,disk_maxtemp);
+                    // 释放 I/O 权限
+                    release_io_permissions();
+                }
             }
             switch (PageIndex)
             {
@@ -2740,13 +2868,9 @@ void* hid_send_thread(void* arg) {
                     }
                     break;
                 case DiskPage_AIM:
-                    int disk_maxtemp = 0;
+                    
                     for (int i = 0; i < pool_count; i++) {
                         if (pools[i].highest_temp != -1) {
-                            if(disk_maxtemp < pools[i].highest_temp)
-                            {
-                                disk_maxtemp = pools[i].highest_temp;
-                            }
                             int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
                             append_crc(request);
                             if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
@@ -2773,11 +2897,7 @@ void* hid_send_thread(void* arg) {
                             #endif
                         }
                     }
-                    // 获取 I/O 权限
-                    acquire_io_permissions();
-                    ec_ram_write_byte(0xB1,disk_maxtemp);
-                    // 释放 I/O 权限
-                    release_io_permissions();
+
                     break;
                 case WlanPage_AIM:
                     //*****************************************************/
