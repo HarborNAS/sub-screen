@@ -178,7 +178,7 @@ void check_and_update_pools();
 void rescan_all_pools();
 PoolInfo pools[MAX_POOLS];
 int pool_count;
-
+int disk_maxtemp = 0;
 //EC6266
 int acquire_io_permissions();
 void release_io_permissions();
@@ -258,6 +258,7 @@ void get_system_info(system_info_t *info);
 
 
 
+unsigned char DGPUtemp = 0;
 
 int cpusuage,cpufan,memoryusage;
 bool Isinitial = false;
@@ -383,6 +384,7 @@ int main(void) {
         Uuused = pools[i].used_size;
         printf("Total size:%d,Used size:%d\n",Tttotal,Uuused);
     }
+
 
     //DiskPage
     #if DebugToken
@@ -679,16 +681,10 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         {
             if(IsNvidiaGPU)
             {
-                unsigned char DGPUtemp;
                 DGPUtemp = nvidia_get_gpu_temperature();
                 request->system_data.system_info.usage = nvidia_get_gpu_utilization();
                 request->system_data.system_info.temerature = DGPUtemp;
                 request->system_data.system_info.rpm = nvidia_get_gpu_fan_speed();
-                // 获取 I/O 权限
-                acquire_io_permissions();
-                ec_ram_write_byte(0xB0,DGPUtemp);
-                // 释放 I/O 权限
-                release_io_permissions();
             }
         }
         return offsetof(Request, system_data.crc) + 1;
@@ -2742,6 +2738,63 @@ void* hid_send_thread(void* arg) {
                 #endif
                 //Refresh disk pools
                 check_and_update_pools();
+
+                for (int i = 0; i < pool_count; i++) 
+                {
+                    if (pools[i].highest_temp != -1)
+                    {
+                        for (int j = 0; j < pools[i].disk_count; j++)
+                        {
+                            if(pools[i].disks[j].disk_name[0] != 'n')
+                            {
+                                if(disk_maxtemp < pools[i].disks[j].temperature)
+                                {
+                                    disk_maxtemp = pools[i].disks[j].temperature;
+                                }
+                            }
+                            else
+                            {
+                                printf("Nvme SSD do not use temperature!\n");
+                            }
+                        }
+                        
+
+                    }
+                }
+                if(IsNvidiaGPU)
+                {
+                    DGPUtemp = nvidia_get_gpu_temperature();
+                    if(DGPUtemp > disk_maxtemp)
+                    {
+                        // 获取 I/O 权限
+                        acquire_io_permissions();
+                        ec_ram_write_byte(0x56,DGPUtemp);
+                        ec_ram_write_byte(0xB0,DGPUtemp);
+                        ec_ram_write_byte(0xB1,0);
+                        // 释放 I/O 权限
+                        release_io_permissions();
+                    }
+                    else
+                    {
+                        // 获取 I/O 权限
+                        acquire_io_permissions();
+                        ec_ram_write_byte(0x56,disk_maxtemp);
+                        ec_ram_write_byte(0xB0,0);
+                        ec_ram_write_byte(0xB1,disk_maxtemp);
+                        // 释放 I/O 权限
+                        release_io_permissions();
+                    }
+                }
+                else
+                {
+                    // 获取 I/O 权限
+                    acquire_io_permissions();
+                    ec_ram_write_byte(0x56,disk_maxtemp);
+                    ec_ram_write_byte(0xB0,0);
+                    ec_ram_write_byte(0xB1,disk_maxtemp);
+                    // 释放 I/O 权限
+                    release_io_permissions();
+                }
             }
             switch (PageIndex)
             {
@@ -2815,13 +2868,9 @@ void* hid_send_thread(void* arg) {
                     }
                     break;
                 case DiskPage_AIM:
-                    int disk_maxtemp = 0;
+                    
                     for (int i = 0; i < pool_count; i++) {
                         if (pools[i].highest_temp != -1) {
-                            if(disk_maxtemp < pools[i].highest_temp)
-                            {
-                                disk_maxtemp = pools[i].highest_temp;
-                            }
                             int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
                             append_crc(request);
                             if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
@@ -2848,11 +2897,7 @@ void* hid_send_thread(void* arg) {
                             #endif
                         }
                     }
-                    // 获取 I/O 权限
-                    acquire_io_permissions();
-                    ec_ram_write_byte(0xB1,disk_maxtemp);
-                    // 释放 I/O 权限
-                    release_io_permissions();
+
                     break;
                 case WlanPage_AIM:
                     //*****************************************************/
