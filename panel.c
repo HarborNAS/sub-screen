@@ -375,7 +375,70 @@ int main(void) {
         
         printf("\n");
     }
+    for (int i = 0; i < pool_count; i++)
+    {
+        short Tttotal,Uuused;
+        Tttotal = pools[i].total_size;
+        Uuused = pools[i].used_size;
+        printf("Total size:%d,Used size:%d\n",Tttotal,Uuused);
+    }
 
+    //DiskPage
+    #if DebugToken
+    printf("-----------------------------------DiskPage initial start-----------------------------------\n");
+    #endif
+    int diskforcount = 0;
+    
+    if(pool_count % 2 == 0)
+        diskforcount = pool_count / 2;
+    else
+        diskforcount = pool_count / 2 + 1;
+    int diskpage;
+    for (int i = 0; i < diskforcount; i++) {
+        diskpage = first_init_hidreport(request, SET, DiskPage_AIM, diskforcount, (i + 1));
+        append_crc(request);
+
+        #if DebugToken
+        printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
+        printf("Diskpage Head: %x\n",request->header);
+        printf("sequence %d\n",request->sequence);
+        printf("lenth %d\n",request->length);
+        printf("cmd %d\n",request->cmd);
+        printf("aim %d\n",request->aim);
+        printf("order %d\n",request->DiskPage_data.order);
+        printf("total: %d\n \n",request->DiskPage_data.total);
+        printf("diskcount %d\n",request->DiskPage_data.diskcount);
+        printf("count: %d\n",request->DiskPage_data.count);
+        printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[0].disklength);
+        printf("Diskid: %d\n",request->DiskPage_data.diskStruct[0].disk_id);
+        printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[0].unit);
+        printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[0].total_size);
+        printf("Diskused: %d\n",request->DiskPage_data.diskStruct[0].used_size);
+        printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[0].temp);
+        printf("Diskname: %s\n",request->DiskPage_data.diskStruct[0].name);
+        if(pool_count-(i*2)>1)
+        {
+            printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[1].disklength);
+            printf("Diskid: %d\n",request->DiskPage_data.diskStruct[1].disk_id);
+            printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[1].unit);
+            printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[1].total_size);
+            printf("Diskused: %d\n",request->DiskPage_data.diskStruct[1].used_size);
+            printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[1].temp);
+            printf("Diskname: %s\n",request->DiskPage_data.diskStruct[1].name);
+        }
+        printf("CRC:%d\n",request->DiskPage_data.crc);
+        printf("Send %d time\n",(i+1));
+        #endif
+                if (safe_hid_write(handle, hid_report, diskpage) == -1) {
+           printf("Failed to write DiskPage data\n");
+           break;
+        }
+        sleep(3);
+        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    }
+    #if DebugToken
+    printf("-----------------------------------DiskPage initial end-----------------------------------\n");
+    #endif
     printf("User Count :%d\n",GetUserCount());
     
     // 显示所有存储池信息
@@ -443,68 +506,7 @@ int main(void) {
     #if DebugToken
     printf("-----------------------------------SystemPage initial end-----------------------------------\n");
     #endif
-    //DiskPage
-    #if DebugToken
-    printf("-----------------------------------DiskPage initial start-----------------------------------\n");
-    #endif
 
-    int diskforcount;
-    
-    if(pool_count % 2 == 0)
-        diskforcount = pool_count / 2;
-    else
-        diskforcount = pool_count / 2 + 1;
-    int diskpage;
-    for (int i = 0; i < diskforcount; i++) {
-        diskpage = first_init_hidreport(request, SET, DiskPage_AIM, diskforcount, (i + 1));
-        append_crc(request);
-        if (safe_hid_write(handle, hid_report, diskpage) == -1) {
-           printf("Failed to write DiskPage data\n");
-           break;
-        }
-        // ZvolInfo* zvol = &all_zvols->all_zvols[i];
-        // printf("%-30s %-20s %-10.2f %-10.2f\n",
-        //        zvol->name,
-        //        zvol->parent_pool,
-        //        zvol->total_gb,
-        //        zvol->usage_percent);
-        #if DebugToken
-        // printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
-        // printf("Diskpage Head: %x\n",request->header);
-        // printf("sequence %d\n",request->sequence);
-        // printf("lenth %d\n",request->length);
-        // printf("cmd %d\n",request->cmd);
-        // printf("aim %d\n",request->aim);
-        // printf("order %d\n",request->DiskPage_data.order);
-        // printf("total: %d\n \n",request->DiskPage_data.total);
-        // printf("diskcount %d\n",request->DiskPage_data.diskcount);
-        // printf("count: %d\n",request->DiskPage_data.count);
-        // printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[0].disklength);
-        // printf("Diskid: %d\n",request->DiskPage_data.diskStruct[0].disk_id);
-        // printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[0].unit);
-        // printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[0].total_size);
-        // printf("Diskused: %d\n",request->DiskPage_data.diskStruct[0].used_size);
-        // printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[0].temp);
-        // printf("Diskname: %s\n",request->DiskPage_data.diskStruct[0].name);
-        // if(disk_count-(i*2)>1)
-        // {
-        //     printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[1].disklength);
-        //     printf("Diskid: %d\n",request->DiskPage_data.diskStruct[1].disk_id);
-        //     printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[1].unit);
-        //     printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[1].total_size);
-        //     printf("Diskused: %d\n",request->DiskPage_data.diskStruct[1].used_size);
-        //     printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[1].temp);
-        //     printf("Diskname: %s\n",request->DiskPage_data.diskStruct[1].name);
-        // }
-        // printf("CRC:%d\n",request->DiskPage_data.crc);
-        // printf("Send %d time\n",(i+1));
-        #endif
-        sleep(3);
-        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-    }
-    #if DebugToken
-    printf("-----------------------------------DiskPage initial end-----------------------------------\n");
-    #endif
     //ModePage
     #if DebugToken
     printf("-----------------------------------ModePage initial start-----------------------------------\n");
@@ -1514,8 +1516,12 @@ int execute_command(const char* command, char* output, size_t output_size) {
         return -1;
     }
     
+    // 调试：打印执行的命令
+    printf("[DEBUG] Executing: %s\n", command);
+    
     FILE* fp = popen(command, "r");
     if (fp == NULL) {
+        fprintf(stderr, "[ERROR] Failed to execute: %s\n", command);
         return -1;
     }
     
@@ -1529,12 +1535,20 @@ int execute_command(const char* command, char* output, size_t output_size) {
             strcat(output, buffer);
             total_read += len;
         } else {
+            // 输出截断警告
+            strncat(output, buffer, output_size - total_read - 1);
+            fprintf(stderr, "[WARNING] Output truncated for command: %s\n", command);
             break;
         }
     }
     
     int status = pclose(fp);
-    return WEXITSTATUS(status);
+    int exit_status = WEXITSTATUS(status);
+    
+    // 调试：打印退出状态
+    printf("[DEBUG] Command exited with status: %d\n", exit_status);
+    
+    return exit_status;
 }
 
 void trim_string(char* str) {
@@ -1743,17 +1757,27 @@ int get_all_pools(PoolInfo* pools, int max_pools) {
 }
 
 int get_pool_info(PoolInfo* pool) {
-    if (pool == NULL) {
+    if (pool == NULL || pool->name[0] == '\0') {
         return -1;
     }
     
-    char command[MAX_COMMAND];
+    char command[2048];
     char output[MAX_OUTPUT];
+    char escaped_pool_name[MAX_PATH * 2]; // 用于转义池名
     
-    // 检查池名长度是否安全
+    // 转义池名中的特殊字符（特别是空格和shell元字符）
+    memset(escaped_pool_name, 0, sizeof(escaped_pool_name));
+    for (int i = 0, j = 0; pool->name[i] && j < (int)sizeof(escaped_pool_name) - 1; i++) {
+        if (strchr(" \t\n\r\"'$`&|;<>()[]{}*?!~\\", pool->name[i])) {
+            escaped_pool_name[j++] = '\\';
+        }
+        escaped_pool_name[j++] = pool->name[i];
+    }
+    
+    // 构建命令
     int required_len = snprintf(NULL, 0, 
-                               "zpool list -H -o size,allocated,free %s 2>/dev/null", 
-                               pool->name);
+                               "zpool list -H -o size,allocated,free '%s' 2>&1", 
+                               escaped_pool_name);
     
     if (required_len >= (int)sizeof(command)) {
         fprintf(stderr, "Error: Pool name too long for command: %s\n", pool->name);
@@ -1761,21 +1785,33 @@ int get_pool_info(PoolInfo* pool) {
     }
     
     snprintf(command, sizeof(command), 
-             "zpool list -H -o size,allocated,free %s 2>/dev/null", 
-             pool->name);
+             "zpool list -H -o size,allocated,free '%s' 2>&1", 
+             escaped_pool_name);
+    
+    printf("Executing command: %s\n", command); // 调试输出
     
     if (execute_command(command, output, sizeof(output)) != 0) {
+        fprintf(stderr, "Failed to execute command for pool: %s\n", pool->name);
         return -1;
     }
+    
+    // 检查命令输出
+    printf("Raw output for pool %s: %s\n", pool->name, output);
     
     char size_str[64], alloc_str[64], free_str[64];
     if (sscanf(output, "%63s %63s %63s", size_str, alloc_str, free_str) != 3) {
+        fprintf(stderr, "Failed to parse zpool list output for %s: %s\n", pool->name, output);
         return -1;
     }
     
-    pool->total_size = parse_size(size_str) / 1073741824;
-    pool->used_size = parse_size(alloc_str) / 1073741824;
-    pool->free_size = parse_size(free_str) / 1073741824;
+    printf("Parsed sizes: total=%s, used=%s, free=%s\n", size_str, alloc_str, free_str);
+    
+    pool->total_size = parse_size(size_str) / 1073741824ULL; // GB
+    pool->used_size = parse_size(alloc_str) / 1073741824ULL;
+    pool->free_size = parse_size(free_str) / 1073741824ULL;
+    
+    printf("Calculated sizes: total=%lluGB, used=%lluGB, free=%lluGB\n", 
+           pool->total_size, pool->used_size, pool->free_size);
     
     return 0;
 }
@@ -2070,7 +2106,6 @@ int update_pool_temperatures(PoolInfo* pool) {
             printf("  Disk %s: Temperature not available\n", disk->name);
         }
     }
-    
     return got_temperature;
 }
 
