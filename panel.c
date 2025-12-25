@@ -2187,61 +2187,7 @@ void check_and_update_pools() {
         rescan_all_pools();
         // 更新记录的数量
         pool_count = current_count;
-        #if DebugToken
-        printf("-----------------------------------DiskPage initial start-----------------------------------\n");
-        #endif
-        int diskforcount = 0;
-        
-        if(pool_count % 2 == 0)
-            diskforcount = pool_count / 2;
-        else
-            diskforcount = pool_count / 2 + 1;
-        int diskpage;
-        for (int i = 0; i < diskforcount; i++) {
-            diskpage = first_init_hidreport(request, SET, DiskPage_AIM, diskforcount, (i + 1));
-            append_crc(request);
-
-            #if DebugToken
-            printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
-            printf("Diskpage Head: %x\n",request->header);
-            printf("sequence %d\n",request->sequence);
-            printf("lenth %d\n",request->length);
-            printf("cmd %d\n",request->cmd);
-            printf("aim %d\n",request->aim);
-            printf("order %d\n",request->DiskPage_data.order);
-            printf("total: %d\n \n",request->DiskPage_data.total);
-            printf("diskcount %d\n",request->DiskPage_data.diskcount);
-            printf("count: %d\n",request->DiskPage_data.count);
-            printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[0].disklength);
-            printf("Diskid: %d\n",request->DiskPage_data.diskStruct[0].disk_id);
-            printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[0].unit);
-            printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[0].total_size);
-            printf("Diskused: %d\n",request->DiskPage_data.diskStruct[0].used_size);
-            printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[0].temp);
-            printf("Diskname: %s\n",request->DiskPage_data.diskStruct[0].name);
-            if(pool_count-(i*2)>1)
-            {
-                printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[1].disklength);
-                printf("Diskid: %d\n",request->DiskPage_data.diskStruct[1].disk_id);
-                printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[1].unit);
-                printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[1].total_size);
-                printf("Diskused: %d\n",request->DiskPage_data.diskStruct[1].used_size);
-                printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[1].temp);
-                printf("Diskname: %s\n",request->DiskPage_data.diskStruct[1].name);
-            }
-            printf("CRC:%d\n",request->DiskPage_data.crc);
-            printf("Send %d time\n",(i+1));
-            #endif
-                    if (safe_hid_write(handle, hid_report, diskpage) == -1) {
-            printf("Failed to write DiskPage data\n");
-            break;
-            }
-            sleep(3);
-            memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-        }
-        #if DebugToken
-        printf("-----------------------------------DiskPage initial end-----------------------------------\n");
-        #endif
+        Isinitial = false;
     }
     else
     {
@@ -2629,24 +2575,8 @@ void* hid_read_thread(void *arg) {
         int res = hid_read(handle, read_buf, sizeof(read_buf));
         
         if (res > 0) {
-            #if DebugToken
-            printf("HID Received %d bytes: ", res);
-            for (int i = 0; i < res; i++) {
-                printf("%02x ", read_buf[i]);
-            }
-            printf("\n");
-            #endif
-            // 检测心跳包
-            if (res >= 7 && 
-                read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
-                read_buf[2] == 0xff && read_buf[3] == 0x04 &&
-                read_buf[4] == 0x00 && read_buf[5] == 0x00 && 
-                read_buf[6] == 0x02) {
-                heartbeat_count++;
-                printf(">>> HEARTBEAT detected! Count: %d\n", heartbeat_count);
-            }
             // 检测其他命令...
-            else if (res >= 6 && 
+            if (res >= 6 && 
                      read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
                      read_buf[2] == 0xff && read_buf[3] == 0x04 &&
                      read_buf[4] == 0x03 && read_buf[5] == 0x82) {
@@ -3008,6 +2938,66 @@ void* hid_send_thread(void* arg) {
             default:
                 break;
             }
+        }
+        else
+        {
+            //Re initial diskpage
+            #if DebugToken
+            printf("-----------------------------------DiskPage initial start-----------------------------------\n");
+            #endif
+            int diskforcount = 0;
+            
+            if(pool_count % 2 == 0)
+                diskforcount = pool_count / 2;
+            else
+                diskforcount = pool_count / 2 + 1;
+            int diskpage;
+            for (int i = 0; i < diskforcount; i++) {
+                diskpage = first_init_hidreport(request, SET, DiskPage_AIM, diskforcount, (i + 1));
+                append_crc(request);
+
+                #if DebugToken
+                printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
+                printf("Diskpage Head: %x\n",request->header);
+                printf("sequence %d\n",request->sequence);
+                printf("lenth %d\n",request->length);
+                printf("cmd %d\n",request->cmd);
+                printf("aim %d\n",request->aim);
+                printf("order %d\n",request->DiskPage_data.order);
+                printf("total: %d\n \n",request->DiskPage_data.total);
+                printf("diskcount %d\n",request->DiskPage_data.diskcount);
+                printf("count: %d\n",request->DiskPage_data.count);
+                printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[0].disklength);
+                printf("Diskid: %d\n",request->DiskPage_data.diskStruct[0].disk_id);
+                printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[0].unit);
+                printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[0].total_size);
+                printf("Diskused: %d\n",request->DiskPage_data.diskStruct[0].used_size);
+                printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[0].temp);
+                printf("Diskname: %s\n",request->DiskPage_data.diskStruct[0].name);
+                if(pool_count-(i*2)>1)
+                {
+                    printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[1].disklength);
+                    printf("Diskid: %d\n",request->DiskPage_data.diskStruct[1].disk_id);
+                    printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[1].unit);
+                    printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[1].total_size);
+                    printf("Diskused: %d\n",request->DiskPage_data.diskStruct[1].used_size);
+                    printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[1].temp);
+                    printf("Diskname: %s\n",request->DiskPage_data.diskStruct[1].name);
+                }
+                printf("CRC:%d\n",request->DiskPage_data.crc);
+                printf("Send %d time\n",(i+1));
+                #endif
+                        if (safe_hid_write(handle, hid_report, diskpage) == -1) {
+                printf("Failed to write DiskPage data\n");
+                break;
+                }
+                sleep(3);
+                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+            }
+            #if DebugToken
+            printf("-----------------------------------DiskPage initial end-----------------------------------\n");
+            #endif
+            Isinitial = true;
         }
     }
     printf("HID send thread exited\n");
