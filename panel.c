@@ -342,7 +342,7 @@ int main(void) {
     if (pool_count == 0) {
         printf("No storage pools found in the system.\n");
         printf("Please check if ZFS is properly configured.\n");
-        return 1;
+        //return 1;
     }
     printf("Found %d storage pool(s):\n", pool_count);
     for (int i = 0; i < pool_count; i++) {
@@ -593,7 +593,7 @@ int main(void) {
 
     while (running) {
 
-        //TimeSleep1Sec();
+        usleep(100000); // 100ms
     }
     // 释放内存
     #if !IfNoPanel
@@ -2999,6 +2999,7 @@ void* hid_send_thread(void* arg) {
             #endif
             Isinitial = true;
         }
+        TimeSleep1Sec();
     }
     printf("HID send thread exited\n");
     return NULL;
