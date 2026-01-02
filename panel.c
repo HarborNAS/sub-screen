@@ -275,31 +275,61 @@ int main(void) {
     #if !IfNoPanel
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-    #if DebugToken
-    printf("Step 1: Initializing HIDAPI...\n");
-    #endif
-    int res = hid_init();
-    if (res != 0) {
-        printf("ERROR: HIDAPI initialization failed with code %d\n", res);
-        return -1;
+    // HIDAPI 初始化
+    int max_retries = 5;
+    int retry_count = 0;
+    int res = -1;
+    handle = NULL;
+    
+    for (retry_count = 0; retry_count < max_retries; retry_count++) {
+        #if DebugToken
+        printf("Attempting to open HID device %04x:%04x... (Attempt %d/%d)\n", 
+               VENDORID, PRODUCTID, retry_count + 1, max_retries);
+        #endif
+        res = hid_init();
+        handle = hid_open(VENDORID, PRODUCTID, NULL);
+        if (handle != NULL) {
+            #if DebugToken
+            printf("HID device opened successfully\n");
+            #endif
+            break;
+        }
+        {
+            printf("ERROR: Failed to open device %04x:%04x\n", VENDORID, PRODUCTID);
+            printf("Available HID devices:\n");
+            printf("----------------------------\n");
+            
+            struct hid_device_info *devs, *cur_dev;
+            devs = hid_enumerate(0x0, 0x0);
+            cur_dev = devs;
+            
+            while (cur_dev) {
+                printf("Device Found:\n");
+                printf("  VID: 0x%04hx\n", cur_dev->vendor_id);
+                printf("  PID: 0x%04hx\n", cur_dev->product_id);
+                printf("  Manufacturer: %ls\n", cur_dev->manufacturer_string);
+                printf("  Product: %ls\n", cur_dev->product_string);
+                printf("  Path: %s\n", cur_dev->path);
+                printf("\n");
+                cur_dev = cur_dev->next;
+            }
+            
+            hid_free_enumeration(devs);
+            printf("----------------------------\n");
+        }
+        printf("Device open failed, retrying in 3 seconds...\n");
+        sleep(3);  // 设备打开可能需要更长等待时间
     }
-    #if DebugToken
-    printf("HIDAPI initialized successfully\n");
-    #endif
-    // 初始化数据
-    handle = hid_open(VENDORID, PRODUCTID, NULL);
     
     #if !IfNoPanel
     if (handle == NULL) {
-        printf("ERROR: Failed to open device %04x:%04x\n", VENDORID, PRODUCTID);
+        printf("ERROR: Failed to open device %04x:%04x after %d attempts\n", 
+               VENDORID, PRODUCTID, max_retries);
         res = hid_exit();
         return 0;
     }
     #endif
    
-    #if DebugToken
-    printf("HID device opened successfully\n");
-    #endif
     #endif
     IsNvidiaGPU = nvidia_smi_available();
     #if DebugToken
