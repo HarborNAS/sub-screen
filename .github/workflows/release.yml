@@ -34,11 +34,15 @@ jobs:
           mkdir -p ${PKG_DIR}/DEBIAN
           mkdir -p ${PKG_DIR}/usr/bin
           mkdir -p ${PKG_DIR}/etc/systemd/system
+          mkdir -p ${PKG_DIR}/usr/share/harboros-subscreen
 
           cp ./harboros-subscreen ${PKG_DIR}/usr/bin/harboros-subscreen
           chmod +x ${PKG_DIR}/usr/bin/harboros-subscreen
 
           cp ./debian/harboros-subscreen.service ${PKG_DIR}/etc/systemd/system/
+
+          cp ./debian/harboros-subscreen-sleep ${PKG_DIR}/usr/share/harboros-subscreen/
+          chmod +x ${PKG_DIR}/usr/share/harboros-subscreen/harboros-subscreen-sleep
 
           cp ./debian/control ${PKG_DIR}/DEBIAN/control
           sed -i "s/VERSION_PLACEHOLDER/${VERSION}/g" ${PKG_DIR}/DEBIAN/control

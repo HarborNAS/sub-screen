@@ -4,4 +4,6 @@ set -e
 systemctl stop harboros-subscreen.service || true
 systemctl disable harboros-subscreen.service || true
 
+rm -f /usr/lib/systemd/system-sleep/harboros-subscreen
+
 exit 0

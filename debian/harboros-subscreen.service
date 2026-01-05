@@ -1,7 +1,6 @@
 [Unit]
 Description=HarborOS Subscreen Service
-After=network.target suspend.target hibernate.target hybrid-sleep.target
-PartOf=suspend.target hibernate.target hybrid-sleep.target
+After=network.target
 
 [Service]
 ExecStart=/usr/bin/harboros-subscreen
