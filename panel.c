@@ -723,10 +723,20 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         get_pool_info(&pools[id]);
         request->length += sizeof(request->disk_data);
         request->disk_data.disk_info.disk_id = id;
-        request->disk_data.disk_info.unit = 0x33;
+        request->disk_data.disk_info.unit = 0x22;
         // ZvolInfo* zvol =&all_zvols->all_zvols[id];
         request->disk_data.disk_info.total_size = pools[id].total_size;
         request->disk_data.disk_info.used_size = pools[id].used_size;
+        if(request->disk_data.disk_info.total_size > 4000)
+        {
+            request->disk_data.disk_info.total_size /= 1024;
+            request->disk_data.disk_info.unit += 1;
+        }
+        if(request->disk_data.disk_info.used_size > 4000)
+        {
+            request->disk_data.disk_info.used_size /= 1024;
+            request->disk_data.disk_info.unit += 0x10;
+        }
         request->disk_data.disk_info.temp = pools[id].highest_temp;
         return offsetof(Request, disk_data.crc) + 1;
     // case GPU_AIM:
@@ -966,10 +976,20 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         {
             request->DiskPage_data.count = 1;
             request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
-            request->DiskPage_data.diskStruct[0].unit = 0x33;
+            request->DiskPage_data.diskStruct[0].unit = 0x22;
             request->DiskPage_data.diskStruct[0].reserve = 0;
             request->DiskPage_data.diskStruct[0].total_size = pools[(order - 1) * 2].total_size;
             request->DiskPage_data.diskStruct[0].used_size = pools[(order - 1) * 2].used_size;
+            if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+            {
+                request->DiskPage_data.diskStruct[0].total_size /= 1024;
+                request->DiskPage_data.diskStruct[0].unit += 1;
+            }
+            if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+            {
+                request->DiskPage_data.diskStruct[0].used_size /= 1024;
+                request->DiskPage_data.diskStruct[0].unit += 0x10;
+            }
             request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
             //reserve name
             for (int i = 0; i < sizeof(pools[(order - 1) * 2].name); i++)
@@ -988,6 +1008,16 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             request->DiskPage_data.diskStruct[0].reserve = 0;
             request->DiskPage_data.diskStruct[0].total_size = pools[(order - 1) * 2].total_size;
             request->DiskPage_data.diskStruct[0].used_size = pools[(order - 1) * 2].used_size;
+            if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+            {
+                request->DiskPage_data.diskStruct[0].total_size /= 1024;
+                request->DiskPage_data.diskStruct[0].unit += 1;
+            }
+            if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+            {
+                request->DiskPage_data.diskStruct[0].used_size /= 1024;
+                request->DiskPage_data.diskStruct[0].unit += 0x10;
+            }
             request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
             //reserve name
             for (int i = 0; i < sizeof(pools[(order - 1) * 2].name); i++)
@@ -1002,6 +1032,16 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             request->DiskPage_data.diskStruct[1].reserve = 0;
             request->DiskPage_data.diskStruct[1].total_size = pools[(order - 1) * 2 + 1].total_size;
             request->DiskPage_data.diskStruct[1].used_size = pools[(order - 1) * 2 + 1].used_size;
+            if(request->DiskPage_data.diskStruct[1].total_size > 4000)
+            {
+                request->DiskPage_data.diskStruct[1].total_size /= 1024;
+                request->DiskPage_data.diskStruct[1].unit += 1;
+            }
+            if(request->DiskPage_data.diskStruct[1].used_size > 4000)
+            {
+                request->DiskPage_data.diskStruct[1].used_size /= 1024;
+                request->DiskPage_data.diskStruct[1].unit += 0x10;
+            }
             request->DiskPage_data.diskStruct[1].temp = pools[(order - 1) * 2 + 1].highest_temp;
             for (int i = 0; i < sizeof(pools[(order - 1) * 2 + 1].name); i++)
             {
