@@ -6,7 +6,7 @@ tested in debian 12 or ubuntu xx
 sudo apt install build-essential
 sudo apt install libhidapi-dev
 sudo apt install libnvidia-ml-dev
-sudo apt install libusb-1.0-0-dev build-essential
+sudo apt-get install libusb-1.0-0-dev
 ```
 
 ## Build
