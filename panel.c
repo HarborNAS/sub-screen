@@ -1,4 +1,3 @@
-#include <hidapi/hidapi.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdbool.h>
@@ -42,18 +41,25 @@
 #include <arpa/inet.h>
 #include <linux/ethtool.h>
 #include <linux/sockios.h>
-#define APIC_ADDRESS 0xFEC00000
-#define APIC_IRQ 0x09
+#include <libusb-1.0/libusb.h>
+
+#define VENDORID 0x5448
+#define PRODUCTID 0x0002
+
+#define TIMEOUT_MS   5000    // 传输超时时间（毫秒）
+#define EP_IN        0x81    // 批量输入端点
+#define EP_OUT       0x02    // 批量输出端点
+#define INTERFACE    0x00    // 接口号
 #define DebugToken   true
 #define SensorLog   true
 #define IfNoPanel   false
 #define hidwritedebug true
+#define OTA             true
 #define MAXLEN 0x40
-#define PRODUCTID 0x0002
-#define VENDORID 0x5448
 #define DURATION 1
 #define MAX_PATH 256
 #define MAX_LINE 512
+#define MAX_OTA_DATA 56
 // ITE
 #define ITE_EC_DATA_PORT    0x62
 #define ITE_EC_INDEX_PORT   0x66
@@ -194,9 +200,19 @@ int ec_query_version(char *version, int max_len);
 void nvidia_print_info();
 //异步HID
 void signal_handler(int sig);
-void* hid_read_thread(void *arg);
-void* hid_send_thread(void* arg);
-int safe_hid_write(hid_device *handle, const unsigned char *data, int length);
+void* usb_read_thread(void *arg);
+int safe_usb_read_timeout(unsigned char *data, int length, int *actual_length, unsigned int timeout_ms);
+int usb_bulk_transfer_with_retry(libusb_device_handle *handle, 
+                                 unsigned char endpoint, 
+                                 unsigned char *data, 
+                                 int length, 
+                                 int *transferred, 
+                                 unsigned int timeout,
+                                 int max_retries);
+int start_usb_read_thread();
+void stop_usb_read_thread();
+int safe_usb_write(unsigned char *data, int length);
+void* usb_send_thread(void* arg);
 void systemoperation(unsigned char time,unsigned char cmd);
 //WLAN
 static interface_manager_t g_iface_manager = {0};
@@ -220,15 +236,15 @@ int get_registered_interfaces(char interfaces[][32], int max_interfaces);
 void cleanup_network_monitor();
 
 
-
 bool IsNvidiaGPU;
 char PageIndex = 0;
 
 //1Hour Count
 int HourTimeDiv = 0;
 static volatile bool running = true;
-static pthread_t read_thread,send_thread;
-static pthread_mutex_t hid_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_t read_thread,send_thread;
+// 互斥锁（用于线程安全）
+pthread_mutex_t usb_mutex = PTHREAD_MUTEX_INITIALIZER;
 struct utmp *ut;
 //Discrete GPU
 typedef struct {
@@ -263,74 +279,306 @@ unsigned char DGPUtemp = 0;
 int cpusuage,cpufan,memoryusage;
 bool Isinitial = false;
 unsigned char cputemp = 0;
-unsigned char hid_report[MAXLEN] = {0};
+unsigned char buffer[MAXLEN] = {0};
 unsigned char ack[MAXLEN] = {0};
 system_info_t sys_info;
-Request* request = (Request *)hid_report;
-hid_device *handle;
+Request request;
 CPUData prev_data, curr_data;
-
-int main(void) {
-    // 设置信号处理
-    #if !IfNoPanel
-    signal(SIGINT, signal_handler);
-    signal(SIGTERM, signal_handler);
-    // HIDAPI 初始化
-    int max_retries = 5;
-    int retry_count = 0;
-    int res = -1;
-    handle = NULL;
+unsigned char Ver[4] = {0,0,0,0};
+int OTASendCnt = 0,OTAReceiveCnt = 0;
+bool OTAContinue = true;
+unsigned char OTAFile[]={0xFF,0xCC};
+static libusb_device_handle *handle = NULL;
+static libusb_context *usb_context = NULL;
+int simple_usb_write_test(unsigned char *data, int length) {
+    if (handle == NULL) {
+        printf("[simple_write] ERROR: Device handle is NULL\n");
+        return -1;
+    }
     
-    for (retry_count = 0; retry_count < max_retries; retry_count++) {
+    printf("[simple_write] Sending %d bytes to endpoint 0x%02X\n", 
+           length, EP_OUT);
+    printf("[simple_write] Data: ");
+    for (int i = 0; i < length && i < 8; i++) {
+        printf("%02X ", data[i]);
+    }
+    if (length > 8) printf("...");
+    printf("\n");
+    
+    int transferred = 0;
+    int result = libusb_bulk_transfer(handle, EP_OUT, data, length, 
+                                      &transferred, 1000); // 1秒超时
+    
+    if (result != LIBUSB_SUCCESS) {
+        printf("[simple_write] ERROR: %s\n", libusb_error_name(result));
+        return -1;
+    }
+    
+    printf("[simple_write] SUCCESS: Transferred %d/%d bytes\n", 
+           transferred, length);
+    return transferred;
+}
+// 在主函数发送数据前，先测试读取
+// 修改 test_read_capability 函数
+void test_read_capability() {
+    printf("\n=== Testing Read Capability ===\n");
+    
+    if (handle == NULL) {
+        printf("Device not opened\n");
+        return;
+    }
+    
+    // 测试1：快速读取测试
+    printf("\nTest 1: Quick read test (100ms timeout)...\n");
+    unsigned char test_buffer[64];
+    int actual_len = 0;
+    
+    // 使用更短的超时时间
+    int result = libusb_bulk_transfer(handle, EP_IN, test_buffer, 
+                                     sizeof(test_buffer), &actual_len, 100);
+    
+    if (result == LIBUSB_SUCCESS && actual_len > 0) {
+        printf("SUCCESS: Received %d bytes\n", actual_len);
+        printf("Data: ");
+        for (int i = 0; i < actual_len && i < 16; i++) {
+            printf("%02X ", test_buffer[i]);
+        }
+        printf("\n");
+    } else if (result == LIBUSB_ERROR_TIMEOUT) {
+        printf("INFO: No data available (正常，设备可能不主动发送数据)\n");
+    } else {
+        printf("ERROR: %s\n", libusb_error_name(result));
+    }
+    
+    // 测试2：发送命令并尝试读取
+    printf("\nTest 2: Sending query command...\n");
+    int homepage = init_hidreport(&request, SET, TIME_AIM, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, homepage);
+    if (safe_usb_write(buffer, homepage)  < 0) {
+        printf("Failed to write HomePage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+
+    if (homepage > 0) {
+        printf("Command sent successfully (%d bytes)\n", homepage);
+        printf("Waiting 100ms before reading...\n");
+        usleep(100000); // 等待100ms
+        
+        printf("Attempting to read response (500ms timeout)...\n");
+        result = libusb_bulk_transfer(handle, EP_IN, test_buffer,
+                                     sizeof(test_buffer), &actual_len, 500);
+        
+        if (result == LIBUSB_SUCCESS && actual_len > 0) {
+            printf("SUCCESS: Response received (%d bytes)\n", actual_len);
+            printf("Response data: ");
+            for (int i = 0; i < actual_len && i < 16; i++) {
+                printf("%02X ", test_buffer[i]);
+            }
+            printf("\n");
+        } else if (result == LIBUSB_ERROR_TIMEOUT) {
+            printf("INFO: No response received (timeout)\n");
+            printf("这可能是因为:\n");
+            printf("1. 设备不需要响应这个命令\n");
+            printf("2. 响应需要更长时间\n");
+            printf("3. 使用错误的命令格式\n");
+        } else {
+            printf("ERROR: %s\n", libusb_error_name(result));
+        }
+    } else {
+        printf("FAILED: Command not sent\n");
+    }
+    
+    printf("\n=== Read Test Complete ===\n");
+}
+int main() {
+
+    int retry_count;
+    int res;
+    
+    // 初始化libusb
+    res = libusb_init(&usb_context);
+    if (res < 0) {
+        fprintf(stderr, "Failed to initialize libusb: %s\n", libusb_error_name(res));
+        return 1;
+    }
+    
+    for (retry_count = 0; retry_count < 3; retry_count++) {
         #if DebugToken
-        printf("Attempting to open HID device %04x:%04x... (Attempt %d/%d)\n", 
-               VENDORID, PRODUCTID, retry_count + 1, max_retries);
+        printf("Attempting to open USB device %04x:%04x... (Attempt %d/%d)\n", 
+               VENDORID, PRODUCTID, retry_count + 1, 3);
         #endif
-        res = hid_init();
-        handle = hid_open(VENDORID, PRODUCTID, NULL);
+        
+        // 使用libusb_open_device_with_vid_pid打开设备
+        handle = libusb_open_device_with_vid_pid(usb_context, VENDORID, PRODUCTID);
+        
         if (handle != NULL) {
             #if DebugToken
-            printf("HID device opened successfully\n");
+            printf("USB device opened successfully\n");
+            
+            // 获取设备描述符信息
+            struct libusb_device_descriptor desc;
+            libusb_device *dev = libusb_get_device(handle);
+            libusb_get_device_descriptor(dev, &desc);
+            
+            printf("Device information:\n");
+            printf("  VID: 0x%04x\n", desc.idVendor);
+            printf("  PID: 0x%04x\n", desc.idProduct);
+            printf("  bcdDevice: 0x%04x\n", desc.bcdDevice);
             #endif
-            break;
-        }
-        {
-            printf("ERROR: Failed to open device %04x:%04x\n", VENDORID, PRODUCTID);
-            printf("Available HID devices:\n");
-            printf("----------------------------\n");
             
-            struct hid_device_info *devs, *cur_dev;
-            devs = hid_enumerate(0x0, 0x0);
-            cur_dev = devs;
-            
-            while (cur_dev) {
-                printf("Device Found:\n");
-                printf("  VID: 0x%04hx\n", cur_dev->vendor_id);
-                printf("  PID: 0x%04hx\n", cur_dev->product_id);
-                printf("  Manufacturer: %ls\n", cur_dev->manufacturer_string);
-                printf("  Product: %ls\n", cur_dev->product_string);
-                printf("  Path: %s\n", cur_dev->path);
-                printf("\n");
-                cur_dev = cur_dev->next;
+            // 如果设备是HID设备，你可能需要声明接口
+            // 这通常需要root权限或正确的udev规则
+            res = libusb_kernel_driver_active(handle, 0);
+            if (res == 1) {
+                printf("Kernel driver active, detaching...\n");
+                libusb_detach_kernel_driver(handle, 0);
             }
             
-            hid_free_enumeration(devs);
+            // 声明接口
+            res = libusb_claim_interface(handle, 0);
+            if (res < 0) {
+                printf("Failed to claim interface: %s\n", libusb_error_name(res));
+                libusb_close(handle);
+                handle = NULL;
+            } else {
+                printf("Interface claimed successfully\n");
+                break;
+            }
+        }
+        
+        if (handle == NULL) {
+            printf("ERROR: Failed to open device %04x:%04x\n", VENDORID, PRODUCTID);
+            printf("Available USB devices:\n");
+            printf("----------------------------\n");
+            
+            // 枚举所有USB设备
+            libusb_device **list;
+            ssize_t cnt = libusb_get_device_list(usb_context, &list);
+            
+            if (cnt < 0) {
+                printf("Failed to get device list\n");
+            } else {
+                for (ssize_t i = 0; i < cnt; i++) {
+                    libusb_device *device = list[i];
+                    struct libusb_device_descriptor desc;
+                    
+                    res = libusb_get_device_descriptor(device, &desc);
+                    if (res < 0) continue;
+                    
+                    printf("Device Found:\n");
+                    printf("  VID: 0x%04x\n", desc.idVendor);
+                    printf("  PID: 0x%04x\n", desc.idProduct);
+                    
+                    // 尝试打开设备获取更多信息
+                    libusb_device_handle *temp_handle;
+                    if (libusb_open(device, &temp_handle) == 0) {
+                        unsigned char str[256];
+                        
+                        if (desc.iManufacturer) {
+                            res = libusb_get_string_descriptor_ascii(temp_handle, 
+                                                                    desc.iManufacturer, 
+                                                                    str, sizeof(str));
+                            if (res > 0) printf("  Manufacturer: %s\n", str);
+                        }
+                        
+                        if (desc.iProduct) {
+                            res = libusb_get_string_descriptor_ascii(temp_handle, 
+                                                                    desc.iProduct, 
+                                                                    str, sizeof(str));
+                            if (res > 0) printf("  Product: %s\n", str);
+                        }
+                        
+                        libusb_close(temp_handle);
+                    }
+                    
+                    printf("  Bus: %03d, Address: %03d\n", 
+                           libusb_get_bus_number(device),
+                           libusb_get_device_address(device));
+                    printf("\n");
+                }
+                
+                libusb_free_device_list(list, 1);
+            }
+            
             printf("----------------------------\n");
         }
-        printf("Device open failed, retrying in 3 seconds...\n");
-        sleep(3);  // 设备打开可能需要更长等待时间
+        
+        if (handle == NULL) {
+            printf("Device open failed, retrying in 3 seconds...\n");
+            sleep(3);
+        }
     }
     
-    #if !IfNoPanel
     if (handle == NULL) {
         printf("ERROR: Failed to open device %04x:%04x after %d attempts\n", 
-               VENDORID, PRODUCTID, max_retries);
-        res = hid_exit();
-        return 0;
+               VENDORID, PRODUCTID, 3);
+    } else {
+        printf("Device successfully opened and ready for communication\n"); 
     }
-    #endif
-   
-    #endif
+    // 清除端点halt状态
+    libusb_clear_halt(handle, EP_OUT);
+    libusb_clear_halt(handle, EP_IN);
+    //OTA first
+    int otapage;
+    otapage = first_init_hidreport(&request, GET, GetVer_AIM, 255, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, otapage);
+    if (safe_usb_write(buffer, otapage) == -1) {
+        printf("Failed to write otapage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    int actual_length = 0;
+    unsigned char read_buf[MAXLEN] = {0};
+    int result;
+    result = libusb_bulk_transfer(handle, EP_IN, read_buf,
+                                     sizeof(read_buf), &actual_length, 500);
+        
+    if (result == LIBUSB_SUCCESS && actual_length > 0) {
+        printf("SUCCESS: Response received (%d bytes)\n", actual_length);
+        printf("Response data: ");
+        for (int i = 0; i < actual_length && i < 16; i++) {
+            printf("%02X ", read_buf[i]);
+        }
+        Ver[0] = read_buf[5];
+        Ver[1] = read_buf[6];
+        Ver[2] = read_buf[7];
+        Ver[3] = read_buf[8];
+        printf("\n");
+    } else if (result == LIBUSB_ERROR_TIMEOUT) {
+        printf("INFO: No response received (timeout)\n");
+    } else {
+        printf("ERROR: %s\n", libusb_error_name(result));
+    }
+    
+
+
+
+        
+    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    if (start_usb_read_thread() != 0) {
+        printf("Failed to start USB read thread\n");
+    } else {
+        printf("USB read thread started successfully\n");
+    }
+
+
     IsNvidiaGPU = nvidia_smi_available();
     #if DebugToken
     printf("WLAN Port=======================\n\n");
@@ -343,29 +591,8 @@ int main(void) {
     // 注册所有物理接口
     int registered = register_all_physical_interfaces();
     monitor_all_interfaces();
-    printf("CPUTemp:,%d\n",get_cpu_temperature());
-    // 创建读取线程
-    #if !IfNoPanel
-    if (pthread_create(&read_thread, NULL, hid_read_thread, handle) != 0) {
-        printf("Failed to create read thread\n");
-        hid_close(handle);
-        hid_exit();
-        return -1;
-    }
-    #endif
 
-    #if DebugToken
-    // printf("CPUTemp:%d\n",cputemp);
-    // unsigned char ECcputemp = 0;
-    // // 获取 I/O 权限
-    // acquire_io_permissions();
-    // ec_ram_read_byte(0x70,&ECcputemp);
-    // printf("EC响应CPU Temp: 0x%02X\n", ECcputemp);
-    // ec_ram_write_byte(0x40,0xFF);
 
-    // // 释放 I/O 权限
-    // release_io_permissions();
-    #endif
     // 扫描硬盘设备 
     pool_count = get_all_pools(pools, MAX_POOLS);
     
@@ -428,46 +655,46 @@ int main(void) {
         diskforcount = pool_count / 2 + 1;
     int diskpage;
     for (int i = 0; i < diskforcount; i++) {
-        diskpage = first_init_hidreport(request, SET, DiskPage_AIM, diskforcount, (i + 1));
-        append_crc(request);
-
+        diskpage = first_init_hidreport(&request, SET, DiskPage_AIM, diskforcount, (i + 1));
+        append_crc(&request);
+        memcpy(buffer, &request, diskpage);
         #if DebugToken
         printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
-        printf("Diskpage Head: %x\n",request->header);
-        printf("sequence %d\n",request->sequence);
-        printf("lenth %d\n",request->length);
-        printf("cmd %d\n",request->cmd);
-        printf("aim %d\n",request->aim);
-        printf("order %d\n",request->DiskPage_data.order);
-        printf("total: %d\n \n",request->DiskPage_data.total);
-        printf("diskcount %d\n",request->DiskPage_data.diskcount);
-        printf("count: %d\n",request->DiskPage_data.count);
-        printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[0].disklength);
-        printf("Diskid: %d\n",request->DiskPage_data.diskStruct[0].disk_id);
-        printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[0].unit);
-        printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[0].total_size);
-        printf("Diskused: %d\n",request->DiskPage_data.diskStruct[0].used_size);
-        printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[0].temp);
-        printf("Diskname: %s\n",request->DiskPage_data.diskStruct[0].name);
+        printf("Diskpage Head: %x\n",request.header);
+        printf("sequence %d\n",request.sequence);
+        printf("lenth %d\n",request.length);
+        printf("cmd %d\n",request.cmd);
+        printf("aim %d\n",request.aim);
+        printf("order %d\n",request.DiskPage_data.order);
+        printf("total: %d\n \n",request.DiskPage_data.total);
+        printf("diskcount %d\n",request.DiskPage_data.diskcount);
+        printf("count: %d\n",request.DiskPage_data.count);
+        printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[0].disklength);
+        printf("Diskid: %d\n",request.DiskPage_data.diskStruct[0].disk_id);
+        printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[0].unit);
+        printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[0].total_size);
+        printf("Diskused: %d\n",request.DiskPage_data.diskStruct[0].used_size);
+        printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[0].temp);
+        printf("Diskname: %s\n",request.DiskPage_data.diskStruct[0].name);
         if(pool_count-(i*2)>1)
         {
-            printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[1].disklength);
-            printf("Diskid: %d\n",request->DiskPage_data.diskStruct[1].disk_id);
-            printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[1].unit);
-            printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[1].total_size);
-            printf("Diskused: %d\n",request->DiskPage_data.diskStruct[1].used_size);
-            printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[1].temp);
-            printf("Diskname: %s\n",request->DiskPage_data.diskStruct[1].name);
+            printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[1].disklength);
+            printf("Diskid: %d\n",request.DiskPage_data.diskStruct[1].disk_id);
+            printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[1].unit);
+            printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[1].total_size);
+            printf("Diskused: %d\n",request.DiskPage_data.diskStruct[1].used_size);
+            printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[1].temp);
+            printf("Diskname: %s\n",request.DiskPage_data.diskStruct[1].name);
         }
-        printf("CRC:%d\n",request->DiskPage_data.crc);
+        printf("CRC:%d\n",request.DiskPage_data.crc);
         printf("Send %d time\n",(i+1));
         #endif
-                if (safe_hid_write(handle, hid_report, diskpage) == -1) {
+        if (safe_usb_write(buffer, diskpage)  < 0) {
            printf("Failed to write DiskPage data\n");
            break;
         }
         sleep(3);
-        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     }
     #if DebugToken
     printf("-----------------------------------DiskPage initial end-----------------------------------\n");
@@ -505,13 +732,14 @@ int main(void) {
     #if DebugToken
     printf("-----------------------------------HomePage initial start-----------------------------------\n");
     #endif
-    int homepage = init_hidreport(request, SET, TIME_AIM, 255);
-    append_crc(request);
-    if (safe_hid_write(handle, hid_report, homepage) == -1) {
+    int homepage = init_hidreport(&request, SET, TIME_AIM, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, homepage);
+    if (safe_usb_write(buffer, homepage)  < 0) {
         printf("Failed to write HomePage data\n");
     }
     sleep(1);
-    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     #if DebugToken
     printf("-----------------------------------HomePage initial end-----------------------------------\n");
     #endif
@@ -519,23 +747,25 @@ int main(void) {
     #if DebugToken
     printf("-----------------------------------SystemPage initial start-----------------------------------\n");
     #endif
-    int systempage1 = first_init_hidreport(request, SET, SystemPage_AIM, 2, 1);
-    append_crc(request);
-    if (safe_hid_write(handle, hid_report, systempage1) == -1) {
+    int systempage1 = first_init_hidreport(&request, SET, SystemPage_AIM, 2, 1);
+    append_crc(&request);
+    memcpy(buffer, &request, systempage1);
+    if (safe_usb_write(buffer, systempage1) == -1) {
         printf("Failed to write SystemPage data\n");
     }
     sleep(3);
-    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     #if DebugToken
     printf("-----------------------------------SystemPage initial second-----------------------------------\n");
     #endif
-    int systempage2 = first_init_hidreport(request, SET, SystemPage_AIM, 2, 2);
-    append_crc(request);
-    if (safe_hid_write(handle, hid_report, systempage2) == -1) {
+    int systempage2 = first_init_hidreport(&request, SET, SystemPage_AIM, 2, 2);
+    append_crc(&request);
+    memcpy(buffer, &request, systempage2);
+    if (safe_usb_write(buffer, systempage2) == -1) {
         printf("Failed to write SystemPage data\n");
     }
     sleep(1);
-    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     #if DebugToken
     printf("-----------------------------------SystemPage initial end-----------------------------------\n");
     #endif
@@ -544,16 +774,17 @@ int main(void) {
     #if DebugToken
     printf("-----------------------------------ModePage initial start-----------------------------------\n");
     #endif
-    int modepage = first_init_hidreport(request, SET, ModePage_AIM, 255, 255);
-    append_crc(request);
-    if (safe_hid_write(handle, hid_report, modepage) == -1) {
+    int modepage = first_init_hidreport(&request, SET, ModePage_AIM, 255, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, modepage);
+    if (safe_usb_write(buffer, modepage)  < 0) {
         printf("Failed to write ModePage data\n");
     }
     #if DebugToken
     printf("-----------------------------------ModePage initial end-----------------------------------\n");
     #endif
     sleep(3);
-    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     //WLANPage
     #if DebugToken
     printf("-----------------------------------WLANPage initial start-----------------------------------\n");
@@ -561,13 +792,14 @@ int main(void) {
     int wlanpage;
     for (int i = 0; i < g_iface_manager.count; i++)
     {
-        wlanpage = first_init_hidreport(request, SET, WlanPage_AIM, g_iface_manager.count, i + 1);
-        append_crc(request);
-        if (safe_hid_write(handle, hid_report, wlanpage) == -1) {
+        wlanpage = first_init_hidreport(&request, SET, WlanPage_AIM, g_iface_manager.count, i + 1);
+        append_crc(&request);
+        memcpy(buffer, &request, wlanpage);
+        if (safe_usb_write(buffer, wlanpage)  < 0) {
             printf("Failed to write WlanPage data\n");
         }
         sleep(3);
-        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
         /* code */
     }
     #if DebugToken
@@ -578,73 +810,146 @@ int main(void) {
     printf("-----------------------------------InfoPage initial start-----------------------------------\n");
     #endif
     int infopage;
-    infopage = first_init_hidreport(request, SET, InfoPage_AIM, 4, 1);
-    append_crc(request);
-    if (safe_hid_write(handle, hid_report, infopage) == -1) {
+    infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 1);
+    append_crc(&request);
+    memcpy(buffer, &request, infopage);
+    if (safe_usb_write(buffer, infopage)  < 0) {
         printf("Failed to write InfoPage data\n");
     }
     sleep(1);
-    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-    infopage = first_init_hidreport(request, SET, InfoPage_AIM, 4, 2);
-    append_crc(request);
-    if (safe_hid_write(handle, hid_report, infopage) == -1) {
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 2);
+    append_crc(&request);
+    memcpy(buffer, &request, infopage);
+    if (safe_usb_write(buffer, infopage)  < 0) {
         printf("Failed to write InfoPage data\n");
     }
     sleep(1);
-    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-    infopage = first_init_hidreport(request, SET, InfoPage_AIM, 4, 3);
-    append_crc(request);
-    if (safe_hid_write(handle, hid_report, infopage) == -1) {
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 3);
+    append_crc(&request);
+    memcpy(buffer, &request, infopage);
+    if (safe_usb_write(buffer, infopage)  < 0) {
         printf("Failed to write InfoPage data\n");
     }
     sleep(1);
-    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
-    infopage = first_init_hidreport(request, SET, InfoPage_AIM, 4, 4);
-    append_crc(request);
-    if (safe_hid_write(handle, hid_report, infopage) == -1) {
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 4);
+    append_crc(&request);
+    memcpy(buffer, &request, infopage);
+    if (safe_usb_write(buffer, infopage)  < 0) {
         printf("Failed to write InfoPage data\n");
     }
     sleep(1);
-    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     #if DebugToken
     printf("-----------------------------------InfoPage initial end-----------------------------------\n");
     #endif
-
     // 创建读取线程
     #if !IfNoPanel
-    if (pthread_create(&send_thread, NULL, hid_send_thread, handle) != 0) {
+    if (pthread_create(&send_thread, NULL, usb_send_thread, handle) != 0) {
         printf("Failed to create send thread\n");
-        hid_close(handle);
-        hid_exit();
         return -1;
     }
     #endif
-    Isinitial = true;
-
     while (running) {
 
         usleep(100000); // 100ms
     }
-    // 释放内存
-    #if !IfNoPanel
+    // 清理资源
     if (read_thread) {
         pthread_join(read_thread, NULL);
     }
     if (send_thread) {
-        pthread_join(send_thread, NULL);
+        stop_usb_read_thread();
     }
-    hid_close(handle);
-    res = hid_exit();
-    #endif
-    printf("程序已安全退出\n");
-    return 0;
+    
+    libusb_release_interface(handle, 0);
+    libusb_close(handle);
+    libusb_exit(usb_context);
+    return handle == NULL ? 1 : 0;
 }
-
+// 初始化USB设备
+libusb_device_handle* init_usb_device() {
+    int result;
+    
+    // 初始化libusb
+    result = libusb_init(&usb_context);
+    if (result < 0) {
+        fprintf(stderr, "Failed to initialize libusb: %s\n", libusb_error_name(result));
+        return NULL;
+    }
+    
+    // 设置调试级别（可选）
+    #ifdef USB_DEBUG
+    libusb_set_option(usb_context, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
+    #endif
+    
+    // 打开设备
+    handle = libusb_open_device_with_vid_pid(usb_context, VENDORID, PRODUCTID);
+    if (handle == NULL) {
+        fprintf(stderr, "Failed to open USB device (VID: 0x%04X, PID: 0x%04X)\n", 
+                VENDORID, PRODUCTID);
+        libusb_exit(usb_context);
+        return NULL;
+    }
+    
+    // 检查是否需要内核驱动分离
+    if (libusb_kernel_driver_active(handle, INTERFACE) == 1) {
+        printf("Kernel driver active, detaching it...\n");
+        result = libusb_detach_kernel_driver(handle, INTERFACE);
+        if (result != LIBUSB_SUCCESS) {
+            fprintf(stderr, "Failed to detach kernel driver: %s\n", libusb_error_name(result));
+            libusb_close(handle);
+            libusb_exit(usb_context);
+            return NULL;
+        }
+    }
+    
+    // 声明接口
+    result = libusb_claim_interface(handle, INTERFACE);
+    if (result != LIBUSB_SUCCESS) {
+        fprintf(stderr, "Failed to claim interface: %s\n", libusb_error_name(result));
+        if (libusb_kernel_driver_active(handle, INTERFACE) == 0) {
+            libusb_attach_kernel_driver(handle, INTERFACE);
+        }
+        libusb_close(handle);
+        libusb_exit(usb_context);
+        return NULL;
+    }
+    
+    printf("USB device initialized successfully\n");
+    return handle;
+}
+// 关闭USB设备
+void close_usb_device() {
+    if (handle != NULL) {
+        // 释放接口
+        libusb_release_interface(handle, INTERFACE);
+        
+        // 重新附加内核驱动（如果之前分离了）
+        if (libusb_kernel_driver_active(handle, INTERFACE) == 0) {
+            libusb_attach_kernel_driver(handle, INTERFACE);
+        }
+        
+        // 关闭设备
+        libusb_close(handle);
+        handle = NULL;
+    }
+    
+    if (usb_context != NULL) {
+        libusb_exit(usb_context);
+        usb_context = NULL;
+    }
+    
+    printf("USB device closed\n");
+}
 void TimeSleep1Sec()
 {
     if(HourTimeDiv == 3061)
         HourTimeDiv = 0;
     HourTimeDiv ++;
+    printf("Time:%ld\n",(time(NULL) + 28800));
     // 休眠1秒，但分段休眠以便及时响应退出
     for (int i = 0; i < 10 && running; i++) {
         usleep(100000); // 100ms
@@ -655,7 +960,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
     request->cmd = cmd;
     request->aim = aim;
     request->length = COMMLEN;
-
+    request->sequence = 0;
     switch (aim)
     {
     case TIME_AIM:
@@ -962,6 +1267,15 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             if(IsNvidiaGPU)
             {
                 request->SystemPage_data.count = 2;
+                request->SystemPage_data.systemPage[1].syslength = sizeof(request->SystemPage_data.systemPage[1]);
+                request->SystemPage_data.systemPage[1].sys_id = 3;
+                request->SystemPage_data.systemPage[1].usage = 0;
+                request->SystemPage_data.systemPage[1].temp = 0;//No temp
+                request->SystemPage_data.systemPage[1].rpm = 0;//No fan
+                request->SystemPage_data.systemPage[1].name[0] = 'D';
+                request->SystemPage_data.systemPage[1].name[1] = 'G';
+                request->SystemPage_data.systemPage[1].name[2] = 'P';
+                request->SystemPage_data.systemPage[1].name[3] = 'U';
             }
             else
                 request->SystemPage_data.count = 1;
@@ -1170,6 +1484,19 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             break;
         }
         return offsetof(Request, InfoPage_data.crc) + 1;
+    case GetVer_AIM:
+        request->length += sizeof(request->Version_data);
+        return offsetof(Request, Version_data.crc) + 1;
+    case Updatefw_AIM:
+        request->length += sizeof(request->OTA_data);
+        for (int i = 0; i < total*order; i++)
+        {
+            for (int j = 0; j < MAX_OTA_DATA; j++)
+            {
+                request->OTA_data.data[j] = OTAFile[i*MAX_OTA_DATA+j];
+            }
+        }
+        return offsetof(Request, OTA_data.crc) + 1;   
     default:
         return 0;
     }
@@ -1227,6 +1554,14 @@ void append_crc(Request *request) {
         case WlanIP_AIM:
             len = offsetof(Request, wlanip_data.crc);
             request->wlanip_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case GetVer_AIM:
+            len = offsetof(Request, Version_data.crc);
+            request->Version_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case Updatefw_AIM:
+            len = offsetof(Request, OTA_data.crc);
+            request->OTA_data.crc = cal_crc((unsigned char *)request, len);
             return;
         default:
             len = offsetof(Request, common_data.crc);
@@ -2630,36 +2965,42 @@ void signal_handler(int sig) {
     running = false;
     printf("Received signal %d, shutting down...\n", sig);
 }
-// 阻塞读取线程函数
-void* hid_read_thread(void *arg) {
-    hid_device *handle = (hid_device *)arg;
+void* usb_read_thread(void *arg) {
+    libusb_device_handle *handle = (libusb_device_handle *)arg;
     unsigned char read_buf[MAXLEN] = {0};
-    int heartbeat_count = 0;
-    #if DebugToken
-    printf("HID read thread started (blocking mode)\n");
+    int actual_length = 0;
+    int result;
+    
+    #ifdef USB_DEBUG
+    printf("USB read thread started\n");
     #endif
-    // 使用阻塞模式 - 这样会一直等待直到有数据到达
-    hid_set_nonblocking(handle, 0);
+    
+    // 设置非阻塞读取
+    unsigned int timeout = 1000; // 1秒超时
     
     while (running) {
-        int res = hid_read(handle, read_buf, sizeof(read_buf));
+        // 清零缓冲区
+        memset(read_buf, 0, sizeof(read_buf));
+        actual_length = 0;
         
-        if (res > 0) {
+        // 使用线程安全的USB读取
+        result = safe_usb_read_timeout(read_buf, sizeof(read_buf), &actual_length, timeout);
+        
+        if (result == LIBUSB_SUCCESS && actual_length > 0) {
             // 检测其他命令...
-            if (res >= 6 && 
-                     read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
-                     read_buf[2] == 0xff && read_buf[3] == 0x04 &&
-                     read_buf[4] == 0x03 && read_buf[5] == 0x82) {
+            if (actual_length >= 6 && 
+                read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
+                read_buf[2] == 0xff && read_buf[3] == 0x04 &&
+                read_buf[4] == 0x03 && read_buf[5] == 0x82) {
                 printf(">>> Hibernate command received!\n");
-                systemoperation(HIBERNATEATONCE_AIM,0);
-                //system("shutdown -h now");
+                systemoperation(HIBERNATEATONCE_AIM, 0);
+                // system("shutdown -h now");
             }
-            else if (res >= 6 && 
+            else if (actual_length >= 6 && 
                      read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
                      read_buf[2] == 0xff && read_buf[3] == 0x04 &&
                      read_buf[4] == 0x03) {
-                    switch (read_buf[5])
-                    {
+                switch (read_buf[5]) {
                     case HomePage_AIM:
                         PageIndex = HomePage_AIM;
                         break;
@@ -2675,15 +3016,13 @@ void* hid_read_thread(void *arg) {
                     case Properties_AIM:
                         PageIndex = HomePage_AIM;
                         acquire_io_permissions();
-                        ec_ram_write_byte(0x98,0x05);//Performance
-                        // 释放 I/O 权限
+                        ec_ram_write_byte(0x98, 0x05); // Performance
                         release_io_permissions();
                         break;
                     case Balance_AIM:
                         PageIndex = HomePage_AIM;
                         acquire_io_permissions();
-                        ec_ram_write_byte(0x98,0x03);//Balance
-                        // 释放 I/O 权限
+                        ec_ram_write_byte(0x98, 0x03); // Balance
                         release_io_permissions();
                         break;
                     case InfoPage_AIM:
@@ -2692,29 +3031,218 @@ void* hid_read_thread(void *arg) {
                     default:
                         PageIndex = HomePage_AIM;
                         break;
-                    }
-                    #if DebugToken
-                    printf(">>> PageChange command received!0x%02X\n",PageIndex);
+                }
+                #ifdef USB_DEBUG
+                printf(">>> PageChange command received! 0x%02X\n", PageIndex);
+                #endif
+            }
+            else if (actual_length >= 6 && 
+                     read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
+                     read_buf[2] == 0x00 && read_buf[3] == 0x07) {
+                Ver[0] = read_buf[5];
+                Ver[1] = read_buf[6];
+                Ver[2] = read_buf[7];
+                Ver[3] = read_buf[8];
+                
+                #ifdef USB_DEBUG
+                printf(">>> Version info received: %d.%d.%d.%d\n", 
+                       Ver[0], Ver[1], Ver[2], Ver[3]);
+                #endif
+            }
+            else if (actual_length >= 6 && 
+                     read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
+                     read_buf[2] == 0x00 && read_buf[3] == 0x04 && 
+                     read_buf[4] == UPDATE) {
+                if (read_buf[5]) {
+                    // != 0 Fail
+                    OTAReceiveCnt = 0;
+                    OTAContinue = false;
+                    printf("Failed to receive OTA data\n");
+                } else {
+                    // == 0 Pass
+                    OTAReceiveCnt++;
+                    OTAContinue = true;
+                    
+                    #ifdef USB_DEBUG
+                    printf(">>> OTA data received successfully, count: %d\n", OTAReceiveCnt);
                     #endif
+                }
             }
-            else
-            {
+            else {
+                #if 1
+                printf(">>> Received %d bytes:\n", actual_length);
+                for (int i = 0; i < actual_length; i++) {
+                    printf("%02X ", read_buf[i]);
+                    if ((i + 1) % 16 == 0) printf("\n");
+                }
+                printf("\n");
+                #endif
+            }
 
-            }
             
-            memset(read_buf, 0, sizeof(read_buf));
-        } else if (res < 0) {
-            printf("Error reading from HID device\n");
-            break;
+        } else if (result == LIBUSB_ERROR_TIMEOUT) {
+            // 超时是正常的，继续循环
+            continue;
+        } else if (result < 0) {
+            // 其他错误
+            printf("Error reading from USB device: %s (error code: %d)\n", 
+                   libusb_error_name(result), result);
+            
+            // 尝试重新连接
+            if (running) {
+                printf("Attempting to reconnect USB device...\n");
+                usleep(2000000); // 等待2秒
+                
+                // 关闭并重新初始化USB设备
+                close_usb_device();
+                usleep(1000000);
+                
+                if (init_usb_device() == NULL) {
+                    printf("Failed to reconnect USB device, thread exiting\n");
+                    break;
+                }
+                printf("USB device reconnected successfully\n");
+            }
         }
         
+        // 短暂休眠，防止CPU占用过高
+        usleep(10000); // 10ms
     }
     
-    printf("HID read thread exited\n");
+    printf("USB read thread exited\n");
     return NULL;
 }
+
+// 添加带超时参数的安全读取函数
+int safe_usb_read_timeout(unsigned char *data, int length, int *actual_length, 
+                          unsigned int timeout_ms) {
+    int result = -1;
+    
+    #ifdef USB_DEBUG
+    printf("[safe_read] Attempting to read (timeout: %dms)\n", timeout_ms);
+    #endif
+    
+    // 检查设备句柄
+    if (handle == NULL) {
+        printf("[safe_read] ERROR: Device handle is NULL\n");
+        return -1;
+    }
+    
+    // 直接调用 libusb_bulk_transfer，不使用互斥锁
+    // 因为 libusb_bulk_transfer 本身是线程安全的
+    result = libusb_bulk_transfer(handle, EP_IN, data, length, 
+                                  actual_length, timeout_ms);
+    
+    #ifdef USB_DEBUG
+    printf("[safe_read] Result: %d (%s)\n", result, libusb_error_name(result));
+    if (result == LIBUSB_SUCCESS) {
+        printf("[safe_read] Received %d bytes\n", *actual_length);
+    }
+    #endif
+    
+    return result;
+}
+
+// 修改usb_bulk_transfer_with_retry函数，添加重试次数参数
+int usb_bulk_transfer_with_retry(libusb_device_handle *handle, 
+                                 unsigned char endpoint, 
+                                 unsigned char *data, 
+                                 int length, 
+                                 int *transferred, 
+                                 unsigned int timeout,
+                                 int max_retries) {
+    int retries = 0;
+    int result;
+    
+    while (retries <= max_retries) {
+        result = libusb_bulk_transfer(handle, endpoint, data, length, 
+                                      transferred, timeout);
+        
+        if (result == LIBUSB_SUCCESS) {
+            return LIBUSB_SUCCESS;
+        }
+        
+        // 如果是超时错误，可以重试
+        if (result == LIBUSB_ERROR_TIMEOUT) {
+            if (max_retries > 0) {
+                retries++;
+                printf("USB transfer timeout, retry %d/%d\n", retries, max_retries);
+                usleep(100000); // 等待100ms后重试
+                continue;
+            } else {
+                // 超时不重试，直接返回
+                return result;
+            }
+        }
+        
+        // 其他错误直接返回
+        break;
+    }
+    
+    return result;
+}
+
+// 创建和管理读取线程的函数
+pthread_t read_thread;
+int start_usb_read_thread() {
+    if (handle == NULL) {
+        printf("Cannot start read thread: USB device not initialized\n");
+        return -1;
+    }
+    
+    running = 1; // 设置运行标志
+    
+    printf("[Read Thread] Creating read thread...\n");
+    printf("[Read Thread] Device handle: %p\n", (void*)handle);
+    printf("[Read Thread] Endpoint EP_IN: 0x%02X\n", EP_IN);
+    
+    int result = pthread_create(&read_thread, NULL, usb_read_thread, (void*)handle);
+    if (result != 0) {
+        printf("Failed to create USB read thread: error %d\n", result);
+        return -1;
+    }
+    
+    printf("[Read Thread] Thread created successfully, thread ID: %lu\n", 
+           (unsigned long)read_thread);
+    return 0;
+}
+
+void stop_usb_read_thread() {
+    running = 0; // 停止运行标志
+    
+    // 等待线程结束
+    if (read_thread) {
+        pthread_join(read_thread, NULL);
+        printf("USB read thread stopped\n");
+    }
+}
+
+// 线程安全的USB写入函数
+int safe_usb_write(unsigned char *data, int length) {
+    int transferred = 0;
+    
+    pthread_mutex_lock(&usb_mutex);
+    
+    if (handle == NULL) {
+        printf("USB device not initialized\n");
+        pthread_mutex_unlock(&usb_mutex);
+        return -1;
+    }
+    
+    int result = libusb_bulk_transfer(handle, EP_OUT, data, length, 
+                                      &transferred, TIMEOUT_MS);
+    
+    pthread_mutex_unlock(&usb_mutex);
+    
+    if (result != LIBUSB_SUCCESS) {
+        printf("USB write error: %s\n", libusb_error_name(result));
+        return -1;
+    }
+    
+    return transferred;  // 成功时返回写入的字节数
+}
 // 发送线程函数
-void* hid_send_thread(void* arg) {
+void* usb_send_thread(void* arg) {
     printf("HID send thread start\n");
     
     while (running) {
@@ -2725,9 +3253,10 @@ void* hid_send_thread(void* arg) {
             {
                 //1 Min Do
                 for (int i = 0; i < pool_count; i++) {
-                    int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
+                    int diskreportsize = init_hidreport(&request, SET, Disk_AIM, i);
+                    append_crc(&request);
+                    memcpy(buffer, &request, diskreportsize);
+                    if (safe_usb_write(buffer, diskreportsize) == -1) {
                     printf("Failed to write Disk data\n");
                     break;
                     }
@@ -2735,29 +3264,30 @@ void* hid_send_thread(void* arg) {
                     printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
                     #endif
                     printf("diskreportsize: %d\n",diskreportsize);
-                    printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
-                    printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
-                    printf("Disktotal: %d\n",request->disk_data.disk_info.total_size);
-                    printf("Diskused: %d\n",request->disk_data.disk_info.used_size);
-                    printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
-                    printf("DiskCRC: %d\n",request->disk_data.crc);
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    printf("DiskId: %d\n",request.disk_data.disk_info.disk_id);
+                    printf("Diskunit: %d\n",request.disk_data.disk_info.unit);
+                    printf("Disktotal: %d\n",request.disk_data.disk_info.total_size);
+                    printf("Diskused: %d\n",request.disk_data.disk_info.used_size);
+                    printf("Disktemp: %d\n",request.disk_data.disk_info.temp);
+                    printf("DiskCRC: %d\n",request.disk_data.crc);
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                     // 休眠1秒，但分段休眠以便及时响应退出
                     for (int i = 0; i < 10 && running; i++) {
                         usleep(100000); // 100ms
                     }
                 }
             }
-            if(HourTimeDiv % 600 == 0)
+            if(HourTimeDiv % 60 == 0)
             {
                 // Time
-                int timereportsize = init_hidreport(request, SET, TIME_AIM, 255);
-                append_crc(request);
-                if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
+                int timereportsize = init_hidreport(&request, SET, TIME_AIM, 255);
+                append_crc(&request);
+                memcpy(buffer, &request, timereportsize);
+                if (safe_usb_write(buffer, timereportsize) == -1) {
                     printf("Failed to write TIME data\n");
                     break;
                 }
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                 TimeSleep1Sec();
                 #if DebugToken
                 printf("-----------------------------------TimeSendOK-----------------------------------\n");
@@ -2766,13 +3296,14 @@ void* hid_send_thread(void* arg) {
                 int wlansize;
                 for (int i = 0; i < g_iface_manager.count; i++)
                 {
-                    wlansize = init_hidreport(request, SET, WlanTotal_AIM,i);
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, wlansize) == -1) {
+                    wlansize = init_hidreport(&request, SET, WlanTotal_AIM,i);
+                    append_crc(&request);
+                    memcpy(buffer, &request, wlansize);
+                    if (safe_usb_write(buffer, wlansize) == -1) {
                         printf("Failed to write WLANTotal data\n");
                     break;
                     }
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                     TimeSleep1Sec();
                 }
                 #if DebugToken
@@ -2780,13 +3311,14 @@ void* hid_send_thread(void* arg) {
                 #endif
                 for (int i = 0; i < g_iface_manager.count; i++)
                 {
-                    wlansize = init_hidreport(request, SET, WlanIP_AIM, i);
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, wlansize) == -1) {
+                    wlansize = init_hidreport(&request, SET, WlanIP_AIM, i);
+                    append_crc(&request);
+                    memcpy(buffer, &request, wlansize);
+                    if (safe_usb_write(buffer, wlansize) == -1) {
                         printf("Failed to write WlanIP data\n");
                     }
                     TimeSleep1Sec();
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                 }
                 #if DebugToken
                 printf("-----------------------------------WLANIPSendOK-----------------------------------\n");
@@ -2856,13 +3388,13 @@ void* hid_send_thread(void* arg) {
                 case HomePage_AIM:
                     //Use 10Mins send once
                     // // Time
-                    // int timereportsize = init_hidreport(request, SET, TIME_AIM, 255);
-                    // append_crc(request);
-                    // if (safe_hid_write(handle, hid_report, timereportsize) == -1) {
+                    // int timereportsize = init_hidreport(&request, SET, TIME_AIM, 255);
+                    // append_crc(&request);
+                    // if (safe_usb_write(buffer, timereportsize) == -1) {
                     //     printf("Failed to write TIME data\n");
                     //     break;
                     // }
-                    // memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    // memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                     // TimeSleep1Sec();
                     // #if DebugToken
                     // printf("-----------------------------------TimeSendOK-----------------------------------\n");
@@ -2871,51 +3403,55 @@ void* hid_send_thread(void* arg) {
                 case SystemPage_AIM:
                     //*****************************************************/
                     // CPU
-                    int systemreportsize = init_hidreport(request, SET, System_AIM,0);
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, systemreportsize) == -1) {
+                    int systemreportsize = init_hidreport(&request, SET, System_AIM,0);
+                    append_crc(&request);
+                    memcpy(buffer, &request, systemreportsize);
+                    if (safe_usb_write(buffer, systemreportsize) == -1) {
                         printf("Failed to write CPU data\n");
                         break;
                     }
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                     TimeSleep1Sec();
                     #if DebugToken
                     printf("-----------------------------------CPUSendOK-----------------------------------\n");
                     #endif
 
-                    systemreportsize = init_hidreport(request, SET, System_AIM,1);        
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, systemreportsize) == -1) {
+                    systemreportsize = init_hidreport(&request, SET, System_AIM,1);        
+                    append_crc(&request);
+                    memcpy(buffer, &request, systemreportsize);
+                    if (safe_usb_write(buffer, systemreportsize) == -1) {
                         printf("Failed to write iGPU data\n");
                         break;
                     }
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                     TimeSleep1Sec();
                     #if DebugToken
                     printf("-----------------------------------iGPUSendOK-----------------------------------\n");
                     #endif
                     //*****************************************************/
                     // Memory Usage
-                    int memusagesize = init_hidreport(request, SET, System_AIM,2);
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, memusagesize) == -1) {
+                    int memusagesize = init_hidreport(&request, SET, System_AIM,2);
+                    append_crc(&request);
+                    memcpy(buffer, &request, memusagesize);
+                    if (safe_usb_write(buffer, memusagesize) == -1) {
                         printf("Failed to write MEMORY data\n");
                         break;
                     }
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                     TimeSleep1Sec();
                     #if DebugToken
                     printf("-----------------------------------MemorySendOK-----------------------------------\n");
                     #endif
                     if(IsNvidiaGPU)
                     {
-                        int dgpusize = init_hidreport(request, SET, System_AIM,3);
-                        append_crc(request);
-                        if (safe_hid_write(handle, hid_report, dgpusize) == -1) {
+                        int dgpusize = init_hidreport(&request, SET, System_AIM,3);
+                        append_crc(&request);
+                        memcpy(buffer, &request, dgpusize);
+                        if (safe_usb_write(buffer, dgpusize) == -1) {
                             printf("Failed to write GPU data\n");
                         break;
                         }
-                        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                         TimeSleep1Sec();
                         #if DebugToken
                         printf("-----------------------------------GPUSendOK-----------------------------------\n");
@@ -2926,9 +3462,10 @@ void* hid_send_thread(void* arg) {
                     
                     for (int i = 0; i < pool_count; i++) {
                         if (pools[i].highest_temp != -1) {
-                            int diskreportsize = init_hidreport(request, SET, Disk_AIM, i);
-                            append_crc(request);
-                            if (safe_hid_write(handle, hid_report, diskreportsize) == -1) {
+                            int diskreportsize = init_hidreport(&request, SET, Disk_AIM, i);
+                            append_crc(&request);
+                            memcpy(buffer, &request, diskreportsize);
+                            if (safe_usb_write(buffer, diskreportsize) == -1) {
                             printf("Failed to write Disk data\n");
                             break;
                             }
@@ -2936,13 +3473,13 @@ void* hid_send_thread(void* arg) {
                             printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
                             #endif
                             printf("diskreportsize: %d\n",diskreportsize);
-                            printf("DiskId: %d\n",request->disk_data.disk_info.disk_id);
-                            printf("Diskunit: %d\n",request->disk_data.disk_info.unit);
-                            printf("Disktotal: %d\n",request->disk_data.disk_info.total_size);
-                            printf("Diskused: %d\n",request->disk_data.disk_info.used_size);
-                            printf("Disktemp: %d\n",request->disk_data.disk_info.temp);
-                            printf("DiskCRC: %d\n",request->disk_data.crc);
-                            memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                            printf("DiskId: %d\n",request.disk_data.disk_info.disk_id);
+                            printf("Diskunit: %d\n",request.disk_data.disk_info.unit);
+                            printf("Disktotal: %d\n",request.disk_data.disk_info.total_size);
+                            printf("Diskused: %d\n",request.disk_data.disk_info.used_size);
+                            printf("Disktemp: %d\n",request.disk_data.disk_info.temp);
+                            printf("DiskCRC: %d\n",request.disk_data.crc);
+                            memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                             // 休眠1秒，但分段休眠以便及时响应退出
                             for (int i = 0; i < 10 && running; i++) {
                                 usleep(100000); // 100ms
@@ -2957,13 +3494,14 @@ void* hid_send_thread(void* arg) {
                 case WlanPage_AIM:
                     //*****************************************************/
                     // User Online
-                    int usersize = init_hidreport(request, SET, USER_AIM,255);
-                    append_crc(request);
-                    if (safe_hid_write(handle, hid_report, usersize) == -1) {
+                    int usersize = init_hidreport(&request, SET, USER_AIM,255);
+                    append_crc(&request);
+                    memcpy(buffer, &request, usersize);
+                    if (safe_usb_write(buffer, usersize) == -1) {
                         printf("Failed to write USER data\n");
                         break;
                     }
-                    memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                     TimeSleep1Sec();
                     #if DebugToken
                     printf("-----------------------------------UserSendOK-----------------------------------\n");
@@ -2972,29 +3510,32 @@ void* hid_send_thread(void* arg) {
                     int wlanspeedsize,wlantotalsize,wlanip;
                     for (int i = 0; i < g_iface_manager.count; i++)
                     {
-                        wlanspeedsize = init_hidreport(request, SET, WlanSpeed_AIM,i);
-                        append_crc(request);
-                        if (safe_hid_write(handle, hid_report, wlanspeedsize) == -1) {
+                        wlanspeedsize = init_hidreport(&request, SET, WlanSpeed_AIM,i);
+                        append_crc(&request);
+                        memcpy(buffer, &request, wlanspeedsize);
+                        if (safe_usb_write(buffer, wlanspeedsize) == -1) {
                             printf("Failed to write WLANSpeed data\n");
                         break;
                         }
-                        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                         TimeSleep1Sec();
-                         wlantotalsize = init_hidreport(request, SET, WlanTotal_AIM,i);
-                        append_crc(request);
-                        if (safe_hid_write(handle, hid_report, wlantotalsize) == -1) {
+                         wlantotalsize = init_hidreport(&request, SET, WlanTotal_AIM,i);
+                        append_crc(&request);
+                        memcpy(buffer, &request, wlanspeedsize);
+                        if (safe_usb_write(buffer, wlantotalsize) == -1) {
                             printf("Failed to write WLANTotal data\n");
                         break;
                         }
-                        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                         TimeSleep1Sec();
-                        wlanip = init_hidreport(request, SET, WlanIP_AIM, i);
-                        append_crc(request);
-                        if (safe_hid_write(handle, hid_report, wlanip) == -1) {
+                        wlanip = init_hidreport(&request, SET, WlanIP_AIM, i);
+                        append_crc(&request);
+                        memcpy(buffer, &request, wlanip);
+                        if (safe_usb_write(buffer, wlanip) == -1) {
                             printf("Failed to write WlanIP data\n");
                         }
                         TimeSleep1Sec();
-                        memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
                         #if DebugToken
                         printf("-----------------------------------WLANSpeedTotalSendOK%dTime-----------------------------------\n",i);
                         #endif
@@ -3023,46 +3564,46 @@ void* hid_send_thread(void* arg) {
                 diskforcount = pool_count / 2 + 1;
             int diskpage;
             for (int i = 0; i < diskforcount; i++) {
-                diskpage = first_init_hidreport(request, SET, DiskPage_AIM, diskforcount, (i + 1));
-                append_crc(request);
+                diskpage = first_init_hidreport(&request, SET, DiskPage_AIM, diskforcount, (i + 1));
+                append_crc(&request);
 
                 #if DebugToken
                 printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
-                printf("Diskpage Head: %x\n",request->header);
-                printf("sequence %d\n",request->sequence);
-                printf("lenth %d\n",request->length);
-                printf("cmd %d\n",request->cmd);
-                printf("aim %d\n",request->aim);
-                printf("order %d\n",request->DiskPage_data.order);
-                printf("total: %d\n \n",request->DiskPage_data.total);
-                printf("diskcount %d\n",request->DiskPage_data.diskcount);
-                printf("count: %d\n",request->DiskPage_data.count);
-                printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[0].disklength);
-                printf("Diskid: %d\n",request->DiskPage_data.diskStruct[0].disk_id);
-                printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[0].unit);
-                printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[0].total_size);
-                printf("Diskused: %d\n",request->DiskPage_data.diskStruct[0].used_size);
-                printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[0].temp);
-                printf("Diskname: %s\n",request->DiskPage_data.diskStruct[0].name);
+                printf("Diskpage Head: %x\n",request.header);
+                printf("sequence %d\n",request.sequence);
+                printf("lenth %d\n",request.length);
+                printf("cmd %d\n",request.cmd);
+                printf("aim %d\n",request.aim);
+                printf("order %d\n",request.DiskPage_data.order);
+                printf("total: %d\n \n",request.DiskPage_data.total);
+                printf("diskcount %d\n",request.DiskPage_data.diskcount);
+                printf("count: %d\n",request.DiskPage_data.count);
+                printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[0].disklength);
+                printf("Diskid: %d\n",request.DiskPage_data.diskStruct[0].disk_id);
+                printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[0].unit);
+                printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[0].total_size);
+                printf("Diskused: %d\n",request.DiskPage_data.diskStruct[0].used_size);
+                printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[0].temp);
+                printf("Diskname: %s\n",request.DiskPage_data.diskStruct[0].name);
                 if(pool_count-(i*2)>1)
                 {
-                    printf("DiskLength: %d\n",request->DiskPage_data.diskStruct[1].disklength);
-                    printf("Diskid: %d\n",request->DiskPage_data.diskStruct[1].disk_id);
-                    printf("Diskunit: %d\n",request->DiskPage_data.diskStruct[1].unit);
-                    printf("Disktotal: %d\n",request->DiskPage_data.diskStruct[1].total_size);
-                    printf("Diskused: %d\n",request->DiskPage_data.diskStruct[1].used_size);
-                    printf("Disktemp: %d\n",request->DiskPage_data.diskStruct[1].temp);
-                    printf("Diskname: %s\n",request->DiskPage_data.diskStruct[1].name);
+                    printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[1].disklength);
+                    printf("Diskid: %d\n",request.DiskPage_data.diskStruct[1].disk_id);
+                    printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[1].unit);
+                    printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[1].total_size);
+                    printf("Diskused: %d\n",request.DiskPage_data.diskStruct[1].used_size);
+                    printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[1].temp);
+                    printf("Diskname: %s\n",request.DiskPage_data.diskStruct[1].name);
                 }
-                printf("CRC:%d\n",request->DiskPage_data.crc);
+                printf("CRC:%d\n",request.DiskPage_data.crc);
                 printf("Send %d time\n",(i+1));
                 #endif
-                        if (safe_hid_write(handle, hid_report, diskpage) == -1) {
+                        if (safe_usb_write(buffer, diskpage) == -1) {
                 printf("Failed to write DiskPage data\n");
                 break;
                 }
                 sleep(3);
-                memset(hid_report, 0x0, sizeof(unsigned char) * MAXLEN);
+                memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
             }
             #if DebugToken
             printf("-----------------------------------DiskPage initial end-----------------------------------\n");
@@ -3074,14 +3615,6 @@ void* hid_send_thread(void* arg) {
     printf("HID send thread exited\n");
     return NULL;
 }
-// 线程安全的写入函数
-int safe_hid_write(hid_device *handle, const unsigned char *data, int length) {
-    pthread_mutex_lock(&hid_mutex);
-    int result = hid_write(handle, data, length);
-    pthread_mutex_unlock(&hid_mutex);
-    return result;
-}
-
 void systemoperation(unsigned char cmd,unsigned char time)
 {
     char *command = NULL;

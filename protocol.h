@@ -165,6 +165,13 @@ typedef struct __attribute__((__packed__)) {
             unsigned char properties;
             unsigned char crc;
         } ModePage_data;
+        struct __attribute__((__packed__)){
+            unsigned char crc;
+        } Version_data;
+        struct __attribute__((__packed__)){
+            unsigned char data[56];
+            unsigned char crc;
+        } OTA_data;
     };
 } Request;
 
@@ -210,6 +217,7 @@ typedef struct __attribute__((__packed__)) {
 #define GET 0x1
 #define SET 0x2
 #define AUTOSET 0x3
+#define UPDATE 0x4
 // Error Definition
 #define SUCCESS 0x00
 #define PACKETLOSS 0x1
@@ -238,3 +246,5 @@ typedef struct __attribute__((__packed__)) {
 #define Balance_AIM 0x73
 #define HIBERNATEATONCE_AIM 0x81
 #define InfoPage_AIM 0xA0
+#define GetVer_AIM 0xF1
+#define Updatefw_AIM 0xF2
