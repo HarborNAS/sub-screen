@@ -257,5 +257,6 @@ typedef struct __attribute__((__packed__)) {
 #define Balance_AIM 0x73
 #define HIBERNATEATONCE_AIM 0x81
 #define InfoPage_AIM 0xA0
+#define Updatefw_info_AIM 0xF0
 #define GetVer_AIM 0xF1
 #define Updatefw_AIM 0xF2
