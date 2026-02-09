@@ -69,7 +69,11 @@
 #define EC_CMD_READ_RAM     0x80    //Test for read CPUTemp
 #define EC_CMD_WRITE_RAM    0x81
 #define EC_CMD_QUERY        0x84
-
+// 固件升级器结构体
+typedef struct {
+    unsigned char sequence;
+    // 可以添加其他状态信息
+} FirmwareUpgrader;
 // CPU使用率计算结构体
 typedef struct {
     unsigned long user;
@@ -120,9 +124,16 @@ typedef struct {
 } interface_manager_t;
 static unsigned char COMMLEN = offsetof(Request, common_data.data) - offsetof(Request, length);
 void TimeSleep1Sec();
+int safe_usb_read(unsigned char* buffer, int length, int timeout_ms);
+void firmware_upgrader_init(FirmwareUpgrader* upgrader);
+int firmware_upgrade(FirmwareUpgrader* upgrader, 
+                     const char* firmware_path,
+                     unsigned char new_major, unsigned char new_minor,
+                     unsigned char new_patch, unsigned char new_build);
 int init_hidreport(Request *request, unsigned char cmd, unsigned char aim, unsigned char id);
 int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char total,unsigned char order);
 void append_crc(Request *request);
+void appendEmpty_crc(Request *request);
 unsigned char cal_crc(unsigned char * data, int len);
 int get_cpu_temperature();
 int read_temperature_from_hwmon(void);
@@ -290,6 +301,7 @@ bool OTAContinue = true;
 unsigned char OTAFile[]={0xFF,0xCC};
 static libusb_device_handle *handle = NULL;
 static libusb_context *usb_context = NULL;
+bool OTAEnable = false;
 int simple_usb_write_test(unsigned char *data, int length) {
     if (handle == NULL) {
         printf("[simple_write] ERROR: Device handle is NULL\n");
@@ -319,79 +331,6 @@ int simple_usb_write_test(unsigned char *data, int length) {
     return transferred;
 }
 // 在主函数发送数据前，先测试读取
-// 修改 test_read_capability 函数
-void test_read_capability() {
-    printf("\n=== Testing Read Capability ===\n");
-    
-    if (handle == NULL) {
-        printf("Device not opened\n");
-        return;
-    }
-    
-    // 测试1：快速读取测试
-    printf("\nTest 1: Quick read test (100ms timeout)...\n");
-    unsigned char test_buffer[64];
-    int actual_len = 0;
-    
-    // 使用更短的超时时间
-    int result = libusb_bulk_transfer(handle, EP_IN, test_buffer, 
-                                     sizeof(test_buffer), &actual_len, 100);
-    
-    if (result == LIBUSB_SUCCESS && actual_len > 0) {
-        printf("SUCCESS: Received %d bytes\n", actual_len);
-        printf("Data: ");
-        for (int i = 0; i < actual_len && i < 16; i++) {
-            printf("%02X ", test_buffer[i]);
-        }
-        printf("\n");
-    } else if (result == LIBUSB_ERROR_TIMEOUT) {
-        printf("INFO: No data available (正常，设备可能不主动发送数据)\n");
-    } else {
-        printf("ERROR: %s\n", libusb_error_name(result));
-    }
-    
-    // 测试2：发送命令并尝试读取
-    printf("\nTest 2: Sending query command...\n");
-    int homepage = init_hidreport(&request, SET, TIME_AIM, 255);
-    append_crc(&request);
-    memcpy(buffer, &request, homepage);
-    if (safe_usb_write(buffer, homepage)  < 0) {
-        printf("Failed to write HomePage data\n");
-    }
-    sleep(1);
-    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
-
-    if (homepage > 0) {
-        printf("Command sent successfully (%d bytes)\n", homepage);
-        printf("Waiting 100ms before reading...\n");
-        usleep(100000); // 等待100ms
-        
-        printf("Attempting to read response (500ms timeout)...\n");
-        result = libusb_bulk_transfer(handle, EP_IN, test_buffer,
-                                     sizeof(test_buffer), &actual_len, 500);
-        
-        if (result == LIBUSB_SUCCESS && actual_len > 0) {
-            printf("SUCCESS: Response received (%d bytes)\n", actual_len);
-            printf("Response data: ");
-            for (int i = 0; i < actual_len && i < 16; i++) {
-                printf("%02X ", test_buffer[i]);
-            }
-            printf("\n");
-        } else if (result == LIBUSB_ERROR_TIMEOUT) {
-            printf("INFO: No response received (timeout)\n");
-            printf("这可能是因为:\n");
-            printf("1. 设备不需要响应这个命令\n");
-            printf("2. 响应需要更长时间\n");
-            printf("3. 使用错误的命令格式\n");
-        } else {
-            printf("ERROR: %s\n", libusb_error_name(result));
-        }
-    } else {
-        printf("FAILED: Command not sent\n");
-    }
-    
-    printf("\n=== Read Test Complete ===\n");
-}
 int main() {
 
     int retry_count;
@@ -520,56 +459,6 @@ int main() {
     // 清除端点halt状态
     libusb_clear_halt(handle, EP_OUT);
     libusb_clear_halt(handle, EP_IN);
-    //OTA first
-    int otapage;
-    otapage = first_init_hidreport(&request, GET, GetVer_AIM, 255, 255);
-    append_crc(&request);
-    memcpy(buffer, &request, otapage);
-    if (safe_usb_write(buffer, otapage) == -1) {
-        printf("Failed to write otapage data\n");
-    }
-    sleep(1);
-    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
-    int actual_length = 0;
-    unsigned char read_buf[MAXLEN] = {0};
-    int result;
-    result = libusb_bulk_transfer(handle, EP_IN, read_buf,
-                                     sizeof(read_buf), &actual_length, 500);
-        
-    if (result == LIBUSB_SUCCESS && actual_length > 0) {
-        printf("SUCCESS: Response received (%d bytes)\n", actual_length);
-        printf("Response data: ");
-        for (int i = 0; i < actual_length && i < 16; i++) {
-            printf("%02X ", read_buf[i]);
-        }
-        Ver[0] = read_buf[5];
-        Ver[1] = read_buf[6];
-        Ver[2] = read_buf[7];
-        Ver[3] = read_buf[8];
-        printf("\n");
-    } else if (result == LIBUSB_ERROR_TIMEOUT) {
-        printf("INFO: No response received (timeout)\n");
-    } else {
-        printf("ERROR: %s\n", libusb_error_name(result));
-    }
-    
-
-
-
-        
-    
-
-
-
-
-
-
-
-
-
-
-
-
 
 
     if (start_usb_read_thread() != 0) {
@@ -578,11 +467,104 @@ int main() {
         printf("USB read thread started successfully\n");
     }
 
+    //OTA first
+    int otapage;
+    otapage = init_hidreport(&request, SET, TIME_AIM, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, otapage);
+    if (safe_usb_write(buffer, otapage)  < 0) {
+        printf("Failed to write Time data\n");
+    }
+    // 休眠1秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 10; i++) {
+        usleep(100000); // 100ms
+    }
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    unsigned char response[64];
+    int read_len = safe_usb_read(response, 64, 150);
+    if (read_len > 0) {
+        printf(">>> Received %d bytes:\n", read_len);
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);
+            if ((i + 1) % 16 == 0) printf("\n");
+        }
+    }
+    printf("\n");
+
+
+
+    otapage = first_init_hidreport(&request, GET, GetVer_AIM, 255, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, otapage);
+    if (safe_usb_write(buffer, otapage) == -1) {
+        printf("Failed to write otapage data\n");
+    }
+    // 休眠1秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 10; i++) {
+        usleep(100000); // 100ms
+    }
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    read_len = safe_usb_read(response, 64, 150);
+    if (read_len > 0) {
+        printf(">>> Received %d bytes:\n", read_len);
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);
+            if ((i + 1) % 16 == 0) printf("\n");
+        }
+        Ver[0] = response[5];
+        Ver[1] = response[6];
+        Ver[2] = response[7];
+        Ver[3] = response[8];
+        
+        #if 1
+        printf(">>> Version info received: %d.%d.%d.%d\n", 
+                Ver[0], Ver[1], Ver[2], Ver[3]);
+        #endif
+    }
+    printf("\n");
+    otapage = first_init_hidreport(&request, GET, GetVer_AIM, 255, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, otapage);
+    if (safe_usb_write(buffer, otapage) == -1) {
+        printf("Failed to write otapage data\n");
+    }
+    // 休眠5秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 10; i++) {
+        usleep(100000); // 100ms
+    }
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+        read_len = safe_usb_read(response, 64, 150);
+    if (read_len > 0) {
+        printf(">>> Received %d bytes:\n", read_len);
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);
+            if ((i + 1) % 16 == 0) printf("\n");
+        }
+        Ver[0] = response[5];
+        Ver[1] = response[6];
+        Ver[2] = response[7];
+        Ver[3] = response[8];
+        
+        #if 1
+        printf(">>> Version info received: %d.%d.%d.%d\n", 
+                Ver[0], Ver[1], Ver[2], Ver[3]);
+        #endif
+    }
+
+    FirmwareUpgrader upgrader;
+    firmware_upgrader_init(&upgrader);
+    int result = -1;
+    // 执行升级
+    result = firmware_upgrade(&upgrader, "./firmware", 0, 2, 1, 0);
+    
+    if (result == 0) {
+        printf("Update Success!!\n");
+    } else {
+        printf("Update Fail!!\n");
+    }
+
 
     IsNvidiaGPU = nvidia_smi_available();
-    #if DebugToken
-    printf("WLAN Port=======================\n\n");
-    #endif
     // 扫描所有物理网络接口
     if (init_network_monitor() < 0) {
         printf("No WLAN Port!\n");
@@ -693,7 +675,7 @@ int main() {
            printf("Failed to write DiskPage data\n");
            break;
         }
-        sleep(3);
+        sleep(1);
         memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     }
     #if DebugToken
@@ -753,7 +735,7 @@ int main() {
     if (safe_usb_write(buffer, systempage1) == -1) {
         printf("Failed to write SystemPage data\n");
     }
-    sleep(3);
+    sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     #if DebugToken
     printf("-----------------------------------SystemPage initial second-----------------------------------\n");
@@ -783,7 +765,7 @@ int main() {
     #if DebugToken
     printf("-----------------------------------ModePage initial end-----------------------------------\n");
     #endif
-    sleep(3);
+    sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     //WLANPage
     #if DebugToken
@@ -798,7 +780,7 @@ int main() {
         if (safe_usb_write(buffer, wlanpage)  < 0) {
             printf("Failed to write WlanPage data\n");
         }
-        sleep(3);
+        sleep(1);
         memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
         /* code */
     }
@@ -845,6 +827,15 @@ int main() {
     #if DebugToken
     printf("-----------------------------------InfoPage initial end-----------------------------------\n");
     #endif
+
+    otapage = first_init_hidreport(&request, GET, GetVer_AIM, 255, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, otapage);
+    if (safe_usb_write(buffer, otapage) == -1) {
+        printf("Failed to write otapage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     // 创建读取线程
     #if !IfNoPanel
     if (pthread_create(&send_thread, NULL, usb_send_thread, handle) != 0) {
@@ -955,6 +946,331 @@ void TimeSleep1Sec()
         usleep(100000); // 100ms
     }
 }
+// 初始化固件升级器
+void firmware_upgrader_init(FirmwareUpgrader* upgrader) {
+    upgrader->sequence = 0;
+}
+// 获取下一个序列号
+unsigned char get_next_sequence(FirmwareUpgrader* upgrader) {
+    upgrader->sequence = (upgrader->sequence + 1) & 0xFF;
+    return upgrader->sequence;
+}
+
+// 封装读取函数，兼容之前的接口
+int safe_usb_read(unsigned char* buffer, int length, int timeout_ms) {
+    int actual_length = 0;
+    int result = safe_usb_read_timeout(buffer, length, &actual_length, timeout_ms);
+    
+    if (result == LIBUSB_SUCCESS) {
+        return actual_length;  // 返回实际读取的字节数
+    } else {
+        return -1;  // 返回错误
+    }
+}
+// 发送固件数据
+int send_firmware_data(FirmwareUpgrader* upgrader, 
+                       const unsigned char* firmware, 
+                       uint32_t total_size,
+                       void (*progress_callback)(int, int)) {
+    uint32_t sent_size = 0;
+    unsigned char chunk[57];
+    unsigned char buffer[64];
+    unsigned char response[64];
+    unsigned char response_data[56];
+    int data_len = 0;
+    int error_code = 0;
+    
+    // 每个数据包的数据部分最大长度
+    int chunk_size = 57 - 1;  // 约57字节
+    
+    printf("\n[MSG] start to transfer fw, Total: %u bytes\n", total_size);
+    printf("MSG] Data per pacakge: %d bytes, 预计 %d 包\n", 
+           chunk_size, (total_size + chunk_size - 1) / chunk_size);
+    
+    time_t start_time = time(NULL);
+    int last_print_progress = -10;
+    
+    while (sent_size < total_size) {
+        OTAEnable = false;
+        // 计算本次发送的数据量
+        uint32_t remaining = total_size - sent_size;
+        int send_len = (remaining < chunk_size) ? remaining : chunk_size;
+        
+        // 复制数据到chunk
+        memcpy(chunk, firmware + sent_size, send_len);
+        
+        // 构建请求包
+        memset(&request, 0, sizeof(Request));
+        request.header = SIGNATURE;
+        request.cmd = UPDATE;
+        request.aim = Updatefw_AIM;
+        request.sequence = get_next_sequence(upgrader);
+        
+        // 复制数据到请求结构
+        memcpy(request.OTA_data.data, chunk, send_len);
+        
+        // 计算数据长度
+        request.length =  COMMLEN + sizeof(request.OTA_data);
+        
+        // 计算包长度
+        int packet_len = offsetof(Request, OTA_data.crc) + 1;  // +1 for CRC
+        // 计算并添加CRC
+        append_crc(&request);
+        // 发送请求
+        memcpy(buffer, &request, packet_len);
+        if (safe_usb_write(buffer, packet_len) < 0) {
+            printf("\n[错误] 发送固件数据失败\n");
+            return -1;
+        }
+
+        // 等待设备响应
+        int read_len = safe_usb_read(response, 64, 150);
+        if (read_len > 0) {
+            printf(">>> Received %d bytes:\n", read_len);
+            for (int i = 0; i < read_len; i++) {
+                printf("%02X ", response[i]);
+                if ((i + 1) % 16 == 0) printf("\n");
+            }
+        }
+        printf("\n");
+        sent_size += send_len;
+        
+        // 计算和显示进度
+        int progress = (sent_size * 100) / total_size;
+        if (progress >= last_print_progress + 1) {
+            time_t elapsed = time(NULL) - start_time;
+            double speed = (elapsed > 0) ? (double)sent_size / elapsed / 1024 : 0;
+            printf("\r[Send] %d%% (%u/%u) | %.1f KB/s   ", 
+                   progress, sent_size, total_size, speed);
+            fflush(stdout);
+            last_print_progress = progress;
+        }
+        
+        // 如果有进度回调函数，调用它
+        if (progress_callback) {
+            progress_callback(sent_size, total_size);
+        }
+    }
+
+    
+    // 打印100%进度
+    time_t elapsed = time(NULL) - start_time;
+    double speed = (elapsed > 0) ? (double)total_size / elapsed / 1024 : 0;
+    printf("\r[SEND] 100%% (%u/%u) | %.1f KB/s   \n", total_size, total_size, speed);
+    printf("\n[MSG] 传输完成! Use %lds, AVG speed %.1f KB/s\n", elapsed, speed);
+    
+    return 0;
+}
+// 发送完成信号
+int send_finish_signal(FirmwareUpgrader* upgrader) {
+    printf("\n[MSG] 发送完成信号...\n");
+    
+    Request request;
+    unsigned char buffer[64];
+    unsigned char response[64];
+    unsigned char response_data[56];
+    int data_len = 0;
+    int error_code = 0;
+    
+    // 构建空数据包请求
+    // 构建空数据包请求
+    int packet_len = first_init_hidreport(&request, UPDATE, Updatefw_AIM, 
+                                         0, 0);
+    appendEmpty_crc(&request);
+    
+    // 发送请求
+    memcpy(buffer, &request, packet_len);
+    if (safe_usb_write(buffer, packet_len) < 0) {
+        printf("[错误] 发送完成信号失败\n");
+        return -1;
+    }
+    
+    // 等待设备响应
+    int read_len = safe_usb_read(response, 64, 5000);
+    if (read_len > 0) {
+        // if (parse_response(response, read_len, response_data, &data_len, &error_code) == 0) {
+        //     if (data_len >= 1) {
+        //         if (error_code == 0) {
+        //             printf("[成功] 升级完成，设备即将重启...\n");
+        //             return 0;
+        //         } else {
+        //             printf("[错误] 完成升级失败, 错误码: %d\n", error_code);
+        //             return -1;
+        //         }
+        //     }
+        // }
+    }
+    
+    printf("[MSG] 设备可能已重启\n");
+    return 0;
+}
+// 发送升级信息
+int send_upgrade_info(FirmwareUpgrader* upgrader, 
+                      unsigned char major, unsigned char minor, 
+                      unsigned char patch, unsigned char build, 
+                      uint32_t firmware_size) {
+    printf("\n[MSG] 发送升级信息: V%d.%d.%d.%d, 大小: %u bytes\n", 
+           build, major, minor, patch, firmware_size);
+    
+    unsigned char buffer[MAXLEN];
+    unsigned char response[MAXLEN];
+    unsigned char response_data[56];
+    int data_len = 0;
+    int error_code = 0;
+    
+    // 构建升级信息数据
+    memset(&request, 0, sizeof(Request));
+    request.header = SIGNATURE;
+    request.cmd = UPDATE;
+    request.aim = Updatefw_info_AIM;
+    request.sequence = 0;
+    
+    // 填充版本数据
+    request.UpgradeInfo_data.build = build;
+    request.UpgradeInfo_data.major = major;
+    request.UpgradeInfo_data.minor = minor;
+    request.UpgradeInfo_data.patch = patch;
+    request.UpgradeInfo_data.size = firmware_size;  // 小端序
+    
+    // 计算数据长度
+    request.length = COMMLEN + sizeof(request.UpgradeInfo_data);  // 不包括CRC
+    
+    // 计算并添加CRC
+    append_crc(&request);
+    
+    // 计算包长度
+    int packet_len = offsetof(Request, UpgradeInfo_data.crc) + 1;
+    printf("UpgrageInfo length:%d\n",packet_len);
+    // 发送请求
+    memcpy(buffer, &request, packet_len);
+    if (safe_usb_write(buffer, packet_len) < 0) {
+        printf("[错误] 发送升级信息失败\n");
+        return -1;
+    }
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    // 休眠5秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 50 && running; i++) {
+        usleep(100000); // 100ms
+    }
+    // 读取响应
+    // if(OTAEnable == false)
+    // {
+    //     printf("[警告] 未收到有效响应...\n");
+    //     return -1;
+    // }
+
+    // int actual_length = 0;
+    // int read_len = safe_usb_read_timeout(response, sizeof(response), &actual_length, 3000);
+    // if (read_len <= 0) {
+    //     printf("[警告] 未收到有效响应，尝试继续...\n");
+    //     return 0;  // 没有响应也尝试继续
+    // }
+    
+    // 解析响应
+    // if (parse_response(response, read_len, response_data, &data_len, &error_code) == 0) {
+    //     if (data_len >= 1) {
+    //         if (error_code == 0) {
+    //             printf("[MSG] 设备允许升级\n");
+    //             return 0;  // 成功
+    //         } else if (error_code == 1) {
+    //             printf("[错误] 固件大小无效\n");
+    //         } else if (error_code == 2) {
+    //             printf("[错误] 版本号不允许 (新版本必须大于当前版本)\n");
+    //         } else {
+    //             printf("[错误] 设备拒绝升级, 错误码: %d\n", error_code);
+    //         }
+    //         return -1;
+    //     }
+    // }
+    return 0;
+}
+int firmware_upgrade(FirmwareUpgrader* upgrader, 
+                     const char* firmware_path,
+                     unsigned char new_build,unsigned char new_major,
+                     unsigned char new_minor,unsigned char new_patch) {
+
+    // 1. 读取固件文件
+    printf("Read fw:%s\n", firmware_path);
+    
+    FILE* file = fopen(firmware_path, "rb");
+    if (!file) {
+        printf("Can not open fw %s\n", firmware_path);
+        return -1;
+    }
+    
+    // 获取文件大小
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    printf("fw size: %ld bytes (%.2f KB)\n", 
+           file_size, (double)file_size / 1024);
+
+    // 检查固件大小 (最大960KB)
+    long max_size = 960 * 1024;
+    if (file_size > max_size) {
+        printf("fw can not over %ld bytes (%ld KB)\n", 
+               max_size, max_size / 1024);
+        fclose(file);
+        return -1;
+    }
+    // 读取固件数据
+    unsigned char* firmware = (unsigned char*)malloc(file_size);
+    if (!firmware) {
+        printf("fail to malloc memory\n");
+        fclose(file);
+        return -1;
+    }
+    size_t read_bytes = fread(firmware, 1, file_size, file);
+    fclose(file);
+    
+    if (read_bytes != file_size) {
+        printf("read fw fail\n");
+        free(firmware);
+        return -1;
+    }
+    // 休眠1秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 10 && running; i++) {
+        usleep(100000); // 100ms
+    }
+    if((Ver[0]!= 0) || (Ver[1]!= 0) || (Ver[2]!= 0) || (Ver[3]!= 0))
+    {
+        printf("Current Version: V%d.%d.%d.%d, New Version:V%d.%d.%d.%d\n",
+               Ver[0], Ver[1], Ver[2], Ver[3],
+               new_build, new_major, new_minor, new_patch);
+        int NVer,OVer;
+        OVer = Ver[0] * 1000 + Ver[1] * 100 + Ver[2] * 10 + Ver[3];
+        NVer = new_build * 1000 + new_major * 100 + new_minor * 10 + new_patch;
+        if(NVer >= OVer)
+        {
+            printf("No need to upgrade!\n");
+            return 0;
+        }
+    }
+    // 3. 发送升级信息
+    if (send_upgrade_info(upgrader, new_major, new_minor, new_patch, 
+                         new_build, (uint32_t)file_size) != 0) {
+        free(firmware);
+        return -1;
+    }
+    // 4. 发送固件数据
+    if (send_firmware_data(upgrader, firmware, (uint32_t)file_size, NULL) != 0) {
+        free(firmware);
+        return -1;
+    }
+    
+    // 5. 发送完成信号
+    if (send_finish_signal(upgrader) != 0) {
+        free(firmware);
+        return -1;
+    }
+    // 清理
+    free(firmware);
+    printf("\n============================================================\n");
+    printf("Update Success!\n");
+    printf("============================================================\n");
+    return 0;
+}
+
 int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char id) {
     request->header = SIGNATURE;
     request->cmd = cmd;
@@ -1488,15 +1804,9 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         request->length += sizeof(request->Version_data);
         return offsetof(Request, Version_data.crc) + 1;
     case Updatefw_AIM:
-        request->length += sizeof(request->OTA_data);
-        for (int i = 0; i < total*order; i++)
-        {
-            for (int j = 0; j < MAX_OTA_DATA; j++)
-            {
-                request->OTA_data.data[j] = OTAFile[i*MAX_OTA_DATA+j];
-            }
-        }
-        return offsetof(Request, OTA_data.crc) + 1;   
+        request->length += sizeof(request->OTA_Enddata);
+        //Send empty package
+        return offsetof(Request, OTA_Enddata.crc) + 1;   
     default:
         return 0;
     }
@@ -1563,18 +1873,37 @@ void append_crc(Request *request) {
             len = offsetof(Request, OTA_data.crc);
             request->OTA_data.crc = cal_crc((unsigned char *)request, len);
             return;
+        case Updatefw_info_AIM:
+            len = offsetof(Request, UpgradeInfo_data.crc);
+            request->UpgradeInfo_data.crc = cal_crc((unsigned char *)request, len);
+            return;
         default:
             len = offsetof(Request, common_data.crc);
             request->common_data.crc = cal_crc((unsigned char *)request, len);
             return;
     }
 }
-
+void appendEmpty_crc(Request *request) {
+    int len = 0;
+    int off = 0;
+    unsigned short crc = 0;
+    switch (request->aim)
+    {
+        case Updatefw_AIM:
+            len = offsetof(Request, OTA_Enddata.crc);
+            request->OTA_Enddata.crc = cal_crc((unsigned char *)request, len);
+            return;
+    
+        default:
+            len = offsetof(Request, common_data.crc);
+            request->common_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+    }
+}
 // unsafe
 unsigned char cal_crc(unsigned char * data, int len) {
     int off = 0;
     unsigned short crc = 0;
-
     for (; off < len; off++) {
         crc += *((unsigned char *)(data) + off);
         #if hidwritedebug
@@ -3044,28 +3373,24 @@ void* usb_read_thread(void *arg) {
                 Ver[2] = read_buf[7];
                 Ver[3] = read_buf[8];
                 
-                #ifdef USB_DEBUG
+                #if 1
                 printf(">>> Version info received: %d.%d.%d.%d\n", 
                        Ver[0], Ver[1], Ver[2], Ver[3]);
                 #endif
             }
             else if (actual_length >= 6 && 
                      read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
-                     read_buf[2] == 0x00 && read_buf[3] == 0x04 && 
-                     read_buf[4] == UPDATE) {
+                     read_buf[3] == 0x04 && read_buf[4] == UPDATE) {
                 if (read_buf[5]) {
                     // != 0 Fail
                     OTAReceiveCnt = 0;
-                    OTAContinue = false;
-                    printf("Failed to receive OTA data\n");
+                    OTAEnable = false;
+                    printf("Failed to receive OTA data,:%d\n",read_buf[5]);
                 } else {
                     // == 0 Pass
                     OTAReceiveCnt++;
-                    OTAContinue = true;
-                    
-                    #ifdef USB_DEBUG
-                    printf(">>> OTA data received successfully, count: %d\n", OTAReceiveCnt);
-                    #endif
+                    OTAEnable = true;
+                    printf(">>>Success to get permission\n" );
                 }
             }
             else {
@@ -3602,7 +3927,7 @@ void* usb_send_thread(void* arg) {
                 printf("Failed to write DiskPage data\n");
                 break;
                 }
-                sleep(3);
+                sleep(1);
                 memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
             }
             #if DebugToken

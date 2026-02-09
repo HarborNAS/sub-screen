@@ -172,6 +172,17 @@ typedef struct __attribute__((__packed__)) {
             unsigned char data[56];
             unsigned char crc;
         } OTA_data;
+        struct __attribute__((__packed__)){
+            unsigned char crc;
+        } OTA_Enddata;
+        struct __attribute__((__packed__)) {
+            unsigned char build;
+            unsigned char major;
+            unsigned char minor;
+            unsigned char patch;
+            unsigned int size;
+            unsigned char crc;
+        } UpgradeInfo_data;
     };
 } Request;
 
