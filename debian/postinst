@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+install -m 755 /usr/share/harboros-subscreen/harboros-subscreen-sleep /usr/lib/systemd/system-sleep/harboros-subscreen
+
 systemctl daemon-reload
 systemctl enable harboros-subscreen.service
 systemctl start harboros-subscreen.service
