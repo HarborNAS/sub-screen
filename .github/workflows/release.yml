@@ -41,7 +41,7 @@ jobs:
           chmod +x ${PKG_DIR}/usr/bin/harboros-subscreen
           # 添加firmware文件
           
-          cp ./firmware ${PKG_DIR}/usr/share/harboros-subscreen/firmware
+          cp ./firmware ${PKG_DIR}//usr/bin/firmware
           cp ./debian/harboros-subscreen.service ${PKG_DIR}/etc/systemd/system/
 
           cp ./debian/harboros-subscreen-sleep ${PKG_DIR}/usr/share/harboros-subscreen/
