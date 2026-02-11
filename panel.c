@@ -256,6 +256,7 @@ static volatile bool running = true;
 pthread_t read_thread,send_thread;
 // 互斥锁（用于线程安全）
 pthread_mutex_t usb_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t hour_time_mutex = PTHREAD_MUTEX_INITIALIZER;
 struct utmp *ut;
 //Discrete GPU
 typedef struct {
@@ -937,9 +938,11 @@ void close_usb_device() {
 }
 void TimeSleep1Sec()
 {
+    pthread_mutex_lock(&hour_time_mutex);
     if(HourTimeDiv == 3061)
         HourTimeDiv = 0;
     HourTimeDiv ++;
+    pthread_mutex_unlock(&hour_time_mutex);
     printf("Time:%ld\n",(time(NULL) + 28800));
     // 休眠1秒，但分段休眠以便及时响应退出
     for (int i = 0; i < 10 && running; i++) {
@@ -3573,8 +3576,12 @@ void* usb_send_thread(void* arg) {
     while (running) {
         if(Isinitial)
         {
+            int local_hour_time_div;
+            pthread_mutex_lock(&hour_time_mutex);
+            local_hour_time_div = HourTimeDiv;
+            pthread_mutex_unlock(&hour_time_mutex);
             // 发送HID数据
-            if(HourTimeDiv % 60 == 0)
+            if(local_hour_time_div % 60 == 0)
             {
                 //1 Min Do
                 for (int i = 0; i < pool_count; i++) {
@@ -3602,7 +3609,7 @@ void* usb_send_thread(void* arg) {
                     }
                 }
             }
-            if(HourTimeDiv % 60 == 0)
+            if(local_hour_time_div % 600 == 0)
             {
                 // Time
                 int timereportsize = init_hidreport(&request, SET, TIME_AIM, 255);
