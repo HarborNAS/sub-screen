@@ -481,16 +481,6 @@ int main() {
         usleep(100000); // 100ms
     }
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
-    unsigned char response[64];
-    int read_len = safe_usb_read(response, 64, 150);
-    if (read_len > 0) {
-        printf(">>> Received %d bytes:\n", read_len);
-        for (int i = 0; i < read_len; i++) {
-            printf("%02X ", response[i]);
-            if ((i + 1) % 16 == 0) printf("\n");
-        }
-    }
-    printf("\n");
 
 
 
@@ -505,23 +495,7 @@ int main() {
         usleep(100000); // 100ms
     }
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
-    read_len = safe_usb_read(response, 64, 150);
-    if (read_len > 0) {
-        printf(">>> Received %d bytes:\n", read_len);
-        for (int i = 0; i < read_len; i++) {
-            printf("%02X ", response[i]);
-            if ((i + 1) % 16 == 0) printf("\n");
-        }
-        Ver[0] = response[5];
-        Ver[1] = response[6];
-        Ver[2] = response[7];
-        Ver[3] = response[8];
-        
-        #if 1
-        printf(">>> Version info received: %d.%d.%d.%d\n", 
-                Ver[0], Ver[1], Ver[2], Ver[3]);
-        #endif
-    }
+
     printf("\n");
     otapage = first_init_hidreport(&request, GET, GetVer_AIM, 255, 255);
     append_crc(&request);
@@ -534,23 +508,7 @@ int main() {
         usleep(100000); // 100ms
     }
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
-        read_len = safe_usb_read(response, 64, 150);
-    if (read_len > 0) {
-        printf(">>> Received %d bytes:\n", read_len);
-        for (int i = 0; i < read_len; i++) {
-            printf("%02X ", response[i]);
-            if ((i + 1) % 16 == 0) printf("\n");
-        }
-        Ver[0] = response[5];
-        Ver[1] = response[6];
-        Ver[2] = response[7];
-        Ver[3] = response[8];
-        
-        #if 1
-        printf(">>> Version info received: %d.%d.%d.%d\n", 
-                Ver[0], Ver[1], Ver[2], Ver[3]);
-        #endif
-    }
+
 
     FirmwareUpgrader upgrader;
     firmware_upgrader_init(&upgrader);
@@ -574,7 +532,21 @@ int main() {
     // 注册所有物理接口
     int registered = register_all_physical_interfaces();
     monitor_all_interfaces();
-
+    printf("\n=== Network Interface Information ===\n");
+    if (g_iface_manager.count > 0 && g_iface_manager.interfaces != NULL) {
+        for (int i = 0; i < g_iface_manager.count; i++) {
+            printf("\n[INFO] Displaying interface %d/%d\n", i+1, g_iface_manager.count);
+            
+            // 检查接口名是否有效
+            if (g_iface_manager.interfaces[i].interface_name[0] != '\0') {
+                display_interface_info(g_iface_manager.interfaces[i].interface_name);
+            } else {
+                printf("[WARN] Interface %d has empty name\n", i+1);
+            }
+        }
+    } else {
+        printf("[INFO] No network interfaces registered or available\n");
+    }
 
     // 扫描硬盘设备 
     pool_count = get_all_pools(pools, MAX_POOLS);
@@ -678,6 +650,7 @@ int main() {
         }
         sleep(1);
         memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+        memset(&request, 0x0, sizeof(Request));
     }
     #if DebugToken
     printf("-----------------------------------DiskPage initial end-----------------------------------\n");
@@ -705,12 +678,6 @@ int main() {
         //         printf("  ------------------------------------------\n");
         //     }
         // }
-   
-    network_interface_t *get_iface = &g_iface_manager.interfaces[0];//order from 1 id from 0
-    display_interface_info(get_iface->interface_name);
-    
-    get_iface = &g_iface_manager.interfaces[1];//order from 1 id from 0
-    display_interface_info(get_iface->interface_name);
     //HomePage
     #if DebugToken
     printf("-----------------------------------HomePage initial start-----------------------------------\n");
@@ -723,6 +690,7 @@ int main() {
     }
     sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
     #if DebugToken
     printf("-----------------------------------HomePage initial end-----------------------------------\n");
     #endif
@@ -738,6 +706,7 @@ int main() {
     }
     sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
     #if DebugToken
     printf("-----------------------------------SystemPage initial second-----------------------------------\n");
     #endif
@@ -749,6 +718,7 @@ int main() {
     }
     sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
     #if DebugToken
     printf("-----------------------------------SystemPage initial end-----------------------------------\n");
     #endif
@@ -768,6 +738,7 @@ int main() {
     #endif
     sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
     //WLANPage
     #if DebugToken
     printf("-----------------------------------WLANPage initial start-----------------------------------\n");
@@ -783,6 +754,7 @@ int main() {
         }
         sleep(1);
         memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
         /* code */
     }
     #if DebugToken
@@ -801,6 +773,7 @@ int main() {
     }
     sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
     infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 2);
     append_crc(&request);
     memcpy(buffer, &request, infopage);
@@ -809,6 +782,7 @@ int main() {
     }
     sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
     infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 3);
     append_crc(&request);
     memcpy(buffer, &request, infopage);
@@ -817,6 +791,7 @@ int main() {
     }
     sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
     infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 4);
     append_crc(&request);
     memcpy(buffer, &request, infopage);
@@ -825,6 +800,7 @@ int main() {
     }
     sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
     #if DebugToken
     printf("-----------------------------------InfoPage initial end-----------------------------------\n");
     #endif
@@ -837,6 +813,7 @@ int main() {
     }
     sleep(1);
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
     // 创建读取线程
     #if !IfNoPanel
     if (pthread_create(&send_thread, NULL, usb_send_thread, handle) != 0) {
@@ -1151,6 +1128,7 @@ int send_upgrade_info(FirmwareUpgrader* upgrader,
         return -1;
     }
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
     // 休眠5秒，但分段休眠以便及时响应退出
     for (int i = 0; i < 50 && running; i++) {
         usleep(100000); // 100ms
@@ -1625,7 +1603,7 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             }
             request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
             //reserve name
-            for (int i = 0; i < sizeof(pools[(order - 1) * 2].name); i++)
+            for (int i = 0; i < 15; i++)
             {
                 request->DiskPage_data.diskStruct[0].name[i] = pools[(order - 1) * 2].name[i];
             }
@@ -1653,7 +1631,7 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
             }
             request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
             //reserve name
-            for (int i = 0; i < sizeof(pools[(order - 1) * 2].name); i++)
+            for (int i = 0; i < 15; i++)
             {
                 request->DiskPage_data.diskStruct[0].name[i] = pools[(order - 1) * 2].name[i];
             }
@@ -1676,7 +1654,7 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
                 request->DiskPage_data.diskStruct[1].unit += 0x10;
             }
             request->DiskPage_data.diskStruct[1].temp = pools[(order - 1) * 2 + 1].highest_temp;
-            for (int i = 0; i < sizeof(pools[(order - 1) * 2 + 1].name); i++)
+            for (int i = 0; i < 15; i++)
             {
                 request->DiskPage_data.diskStruct[1].name[i] = pools[(order - 1) * 2 + 1].name[i];
             }
@@ -3603,6 +3581,7 @@ void* usb_send_thread(void* arg) {
                     printf("Disktemp: %d\n",request.disk_data.disk_info.temp);
                     printf("DiskCRC: %d\n",request.disk_data.crc);
                     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                     // 休眠1秒，但分段休眠以便及时响应退出
                     for (int i = 0; i < 10 && running; i++) {
                         usleep(100000); // 100ms
@@ -3620,6 +3599,7 @@ void* usb_send_thread(void* arg) {
                     break;
                 }
                 memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                 TimeSleep1Sec();
                 #if DebugToken
                 printf("-----------------------------------TimeSendOK-----------------------------------\n");
@@ -3636,6 +3616,7 @@ void* usb_send_thread(void* arg) {
                     break;
                     }
                     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                     TimeSleep1Sec();
                 }
                 #if DebugToken
@@ -3651,6 +3632,7 @@ void* usb_send_thread(void* arg) {
                     }
                     TimeSleep1Sec();
                     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                 }
                 #if DebugToken
                 printf("-----------------------------------WLANIPSendOK-----------------------------------\n");
@@ -3727,6 +3709,7 @@ void* usb_send_thread(void* arg) {
                     //     break;
                     // }
                     // memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+memset(&request, 0x0, sizeof(Request));
                     // TimeSleep1Sec();
                     // #if DebugToken
                     // printf("-----------------------------------TimeSendOK-----------------------------------\n");
@@ -3743,6 +3726,7 @@ void* usb_send_thread(void* arg) {
                         break;
                     }
                     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                     TimeSleep1Sec();
                     #if DebugToken
                     printf("-----------------------------------CPUSendOK-----------------------------------\n");
@@ -3756,6 +3740,7 @@ void* usb_send_thread(void* arg) {
                         break;
                     }
                     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                     TimeSleep1Sec();
                     #if DebugToken
                     printf("-----------------------------------iGPUSendOK-----------------------------------\n");
@@ -3770,6 +3755,7 @@ void* usb_send_thread(void* arg) {
                         break;
                     }
                     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                     TimeSleep1Sec();
                     #if DebugToken
                     printf("-----------------------------------MemorySendOK-----------------------------------\n");
@@ -3784,6 +3770,7 @@ void* usb_send_thread(void* arg) {
                         break;
                         }
                         memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                         TimeSleep1Sec();
                         #if DebugToken
                         printf("-----------------------------------GPUSendOK-----------------------------------\n");
@@ -3812,6 +3799,7 @@ void* usb_send_thread(void* arg) {
                             printf("Disktemp: %d\n",request.disk_data.disk_info.temp);
                             printf("DiskCRC: %d\n",request.disk_data.crc);
                             memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                             // 休眠1秒，但分段休眠以便及时响应退出
                             for (int i = 0; i < 10 && running; i++) {
                                 usleep(100000); // 100ms
@@ -3834,6 +3822,7 @@ void* usb_send_thread(void* arg) {
                         break;
                     }
                     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                     TimeSleep1Sec();
                     #if DebugToken
                     printf("-----------------------------------UserSendOK-----------------------------------\n");
@@ -3850,6 +3839,7 @@ void* usb_send_thread(void* arg) {
                         break;
                         }
                         memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                         TimeSleep1Sec();
                          wlantotalsize = init_hidreport(&request, SET, WlanTotal_AIM,i);
                         append_crc(&request);
@@ -3859,6 +3849,7 @@ void* usb_send_thread(void* arg) {
                         break;
                         }
                         memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                         TimeSleep1Sec();
                         wlanip = init_hidreport(&request, SET, WlanIP_AIM, i);
                         append_crc(&request);
@@ -3868,6 +3859,7 @@ void* usb_send_thread(void* arg) {
                         }
                         TimeSleep1Sec();
                         memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
                         #if DebugToken
                         printf("-----------------------------------WLANSpeedTotalSendOK%dTime-----------------------------------\n",i);
                         #endif
@@ -3936,6 +3928,7 @@ void* usb_send_thread(void* arg) {
                 }
                 sleep(1);
                 memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
             }
             #if DebugToken
             printf("-----------------------------------DiskPage initial end-----------------------------------\n");
@@ -4377,6 +4370,16 @@ void cleanup_network_monitor() {
 
 // 显示接口完整信息
 void display_interface_info(const char *ifname) {
+    // 添加 NULL 检查
+    if (ifname == NULL) {
+        printf("[ERROR] display_interface_info: ifname is NULL\n");
+        return;
+    }
+    
+    if (strlen(ifname) == 0) {
+        printf("[ERROR] display_interface_info: ifname is empty string\n");
+        return;
+    }
     char status[16], mac[18], ip[INET_ADDRSTRLEN], mask[INET_ADDRSTRLEN];
     double rx_speed = 0, tx_speed = 0, rx_total = 0, tx_total = 0;
     
