@@ -303,37 +303,10 @@ unsigned char OTAFile[]={0xFF,0xCC};
 static libusb_device_handle *handle = NULL;
 static libusb_context *usb_context = NULL;
 bool OTAEnable = false;
-int simple_usb_write_test(unsigned char *data, int length) {
-    if (handle == NULL) {
-        printf("[simple_write] ERROR: Device handle is NULL\n");
-        return -1;
-    }
-    
-    printf("[simple_write] Sending %d bytes to endpoint 0x%02X\n", 
-           length, EP_OUT);
-    printf("[simple_write] Data: ");
-    for (int i = 0; i < length && i < 8; i++) {
-        printf("%02X ", data[i]);
-    }
-    if (length > 8) printf("...");
-    printf("\n");
-    
-    int transferred = 0;
-    int result = libusb_bulk_transfer(handle, EP_OUT, data, length, 
-                                      &transferred, 1000); // 1秒超时
-    
-    if (result != LIBUSB_SUCCESS) {
-        printf("[simple_write] ERROR: %s\n", libusb_error_name(result));
-        return -1;
-    }
-    
-    printf("[simple_write] SUCCESS: Transferred %d/%d bytes\n", 
-           transferred, length);
-    return transferred;
-}
-// 在主函数发送数据前，先测试读取
-int main() {
 
+ 
+int initialUSB()
+{
     int retry_count;
     int res;
     
@@ -341,7 +314,7 @@ int main() {
     res = libusb_init(&usb_context);
     if (res < 0) {
         fprintf(stderr, "Failed to initialize libusb: %s\n", libusb_error_name(res));
-        return 1;
+        return -1;
     }
     
     for (retry_count = 0; retry_count < 3; retry_count++) {
@@ -467,6 +440,13 @@ int main() {
     } else {
         printf("USB read thread started successfully\n");
     }
+}
+// 在主函数发送数据前，先测试读取
+int main() {
+
+    //initial USB first
+    if(initialUSB() == -1)
+        return -1;
 
     //OTA first
     int otapage;
@@ -517,11 +497,48 @@ int main() {
     result = firmware_upgrade(&upgrader, "./firmware", 0, 2, 1, 0);
     
     if (result == 0) {
+        printf("No need Update!!\n");
+    } 
+    else if(result == 1)
+    {
         printf("Update Success!!\n");
-    } else {
+        sleep(1);
+        printf("Wait panel restart 15S!!\n");
+        sleep(15);
+        // 获取 I/O 权限
+        acquire_io_permissions();
+        ec_ram_write_byte(0x59,0);//Cut Panel Power
+        // 释放 I/O 权限
+        release_io_permissions();
+        printf("Start Cut Panel Power 3S!!\n");
+        sleep(1);
+        printf("Cut Panel Power 2S!!\n");
+        sleep(1);
+        printf("Cut Panel Power 1S!!\n");
+        sleep(1);
+        printf("Enable Panel Power!!\n");
+        // 获取 I/O 权限
+        acquire_io_permissions();
+        ec_ram_write_byte(0x59,1);//Enable Panel Power
+        // 释放 I/O 权限
+        release_io_permissions();
+        printf("Re connect Panel!!\n");
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        initialUSB();
+        
+    }
+    else
+    {
         printf("Update Fail!!\n");
     }
-
+    OTAEnable = false;
 
     IsNvidiaGPU = nvidia_smi_available();
     // 扫描所有物理网络接口
@@ -838,58 +855,7 @@ int main() {
     libusb_exit(usb_context);
     return handle == NULL ? 1 : 0;
 }
-// 初始化USB设备
-libusb_device_handle* init_usb_device() {
-    int result;
-    
-    // 初始化libusb
-    result = libusb_init(&usb_context);
-    if (result < 0) {
-        fprintf(stderr, "Failed to initialize libusb: %s\n", libusb_error_name(result));
-        return NULL;
-    }
-    
-    // 设置调试级别（可选）
-    #ifdef USB_DEBUG
-    libusb_set_option(usb_context, LIBUSB_OPTION_LOG_LEVEL, LIBUSB_LOG_LEVEL_DEBUG);
-    #endif
-    
-    // 打开设备
-    handle = libusb_open_device_with_vid_pid(usb_context, VENDORID, PRODUCTID);
-    if (handle == NULL) {
-        fprintf(stderr, "Failed to open USB device (VID: 0x%04X, PID: 0x%04X)\n", 
-                VENDORID, PRODUCTID);
-        libusb_exit(usb_context);
-        return NULL;
-    }
-    
-    // 检查是否需要内核驱动分离
-    if (libusb_kernel_driver_active(handle, INTERFACE) == 1) {
-        printf("Kernel driver active, detaching it...\n");
-        result = libusb_detach_kernel_driver(handle, INTERFACE);
-        if (result != LIBUSB_SUCCESS) {
-            fprintf(stderr, "Failed to detach kernel driver: %s\n", libusb_error_name(result));
-            libusb_close(handle);
-            libusb_exit(usb_context);
-            return NULL;
-        }
-    }
-    
-    // 声明接口
-    result = libusb_claim_interface(handle, INTERFACE);
-    if (result != LIBUSB_SUCCESS) {
-        fprintf(stderr, "Failed to claim interface: %s\n", libusb_error_name(result));
-        if (libusb_kernel_driver_active(handle, INTERFACE) == 0) {
-            libusb_attach_kernel_driver(handle, INTERFACE);
-        }
-        libusb_close(handle);
-        libusb_exit(usb_context);
-        return NULL;
-    }
-    
-    printf("USB device initialized successfully\n");
-    return handle;
-}
+
 // 关闭USB设备
 void close_usb_device() {
     if (handle != NULL) {
@@ -971,7 +937,6 @@ int send_firmware_data(FirmwareUpgrader* upgrader,
     int last_print_progress = -10;
     
     while (sent_size < total_size) {
-        OTAEnable = false;
         // 计算本次发送的数据量
         uint32_t remaining = total_size - sent_size;
         int send_len = (remaining < chunk_size) ? remaining : chunk_size;
@@ -1221,12 +1186,13 @@ int firmware_upgrade(FirmwareUpgrader* upgrader,
         int NVer,OVer;
         OVer = Ver[0] * 1000 + Ver[1] * 100 + Ver[2] * 10 + Ver[3];
         NVer = new_build * 1000 + new_major * 100 + new_minor * 10 + new_patch;
-        if(NVer >= OVer)
+        if(OVer >= NVer)
         {
             printf("No need to upgrade!\n");
             return 0;
         }
     }
+    OTAEnable = true;
     // 3. 发送升级信息
     if (send_upgrade_info(upgrader, new_major, new_minor, new_patch, 
                          new_build, (uint32_t)file_size) != 0) {
@@ -1249,7 +1215,7 @@ int firmware_upgrade(FirmwareUpgrader* upgrader,
     printf("\n============================================================\n");
     printf("Update Success!\n");
     printf("============================================================\n");
-    return 0;
+    return 1;
 }
 
 int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char id) {
@@ -3364,13 +3330,8 @@ void* usb_read_thread(void *arg) {
                      read_buf[3] == 0x04 && read_buf[4] == UPDATE) {
                 if (read_buf[5]) {
                     // != 0 Fail
-                    OTAReceiveCnt = 0;
-                    OTAEnable = false;
                     printf("Failed to receive OTA data,:%d\n",read_buf[5]);
                 } else {
-                    // == 0 Pass
-                    OTAReceiveCnt++;
-                    OTAEnable = true;
                     printf(">>>Success to get permission\n" );
                 }
             }
@@ -3390,24 +3351,27 @@ void* usb_read_thread(void *arg) {
             // 超时是正常的，继续循环
             continue;
         } else if (result < 0) {
-            // 其他错误
-            printf("Error reading from USB device: %s (error code: %d)\n", 
-                   libusb_error_name(result), result);
-            
-            // 尝试重新连接
-            if (running) {
-                printf("Attempting to reconnect USB device...\n");
-                usleep(2000000); // 等待2秒
+            if(!OTAEnable)
+            {
+                // 其他错误
+                printf("Error reading from USB device: %s (error code: %d)\n", 
+                    libusb_error_name(result), result);
                 
-                // 关闭并重新初始化USB设备
-                close_usb_device();
-                usleep(1000000);
-                
-                if (init_usb_device() == NULL) {
-                    printf("Failed to reconnect USB device, thread exiting\n");
-                    break;
+                //尝试重新连接
+                if (running) {
+                    printf("Attempting to reconnect USB device...\n");
+                    usleep(2000000); // 等待2秒
+                    
+                    // 关闭并重新初始化USB设备
+                    close_usb_device();
+                    usleep(1000000);
+                    
+                    if (initialUSB() == -1) {
+                        printf("Failed to reconnect USB device, thread exiting\n");
+                        break;
+                    }
+                    printf("USB device reconnected successfully\n");
                 }
-                printf("USB device reconnected successfully\n");
             }
         }
         
