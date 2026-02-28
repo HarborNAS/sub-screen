@@ -174,7 +174,21 @@ typedef struct {
     int disk_count;
     int highest_temp;
 } PoolInfo;
-
+//Linux disk
+typedef struct {
+    char device[32];           // 设备名 (sda, nvme0n1等)
+    char model[128];           // 硬盘型号
+    char serial[64];           // 序列号
+    char mountpoint[MAX_PATH]; // 挂载点
+    unsigned long long total_size;    // 总容量 (bytes)
+    unsigned long long free_size;     // 可用容量 (bytes)
+    unsigned long long used_size;     // 已用容量 (bytes)
+    double usage_percent;      // 使用百分比
+    int temperature;           // 温度 (°C)
+    char type[16];             // 硬盘类型 (SATA/NVMe)
+} disk_info_t;
+disk_info_t disks[MAX_DISKS_PER_POOL];
+int disk_count = 0;
 int execute_command(const char* command, char* output, size_t output_size);
 void trim_string(char* str);
 int file_exists(const char* path);
@@ -196,6 +210,13 @@ void rescan_all_pools();
 PoolInfo pools[MAX_POOLS];
 int pool_count;
 int disk_maxtemp = 0;
+void get_disk_identity(const char *device, char *model, char *serial);
+unsigned long long get_disk_size(const char *device);
+void get_mountpoint(const char *device, char *mountpoint);
+int get_mountpoint_usage(const char *mountpoint, unsigned long long *total, 
+                        unsigned long long *free, unsigned long long *used);
+int scan_disk_devices(disk_info_t *disks, int max_disks);
+int refresh_linux_disks(disk_info_t *disks, int count);
 //EC6266
 int acquire_io_permissions();
 void release_io_permissions();
@@ -571,7 +592,11 @@ int main() {
     if (pool_count == 0) {
         printf("No storage pools found in the system.\n");
         printf("Please check if ZFS is properly configured.\n");
-        //return 1;
+        //如果不是ZFS就尝试直接读磁盘信息
+        disk_count = scan_disk_devices(disks, 10);
+        if (disk_count <= 0) {
+            printf("Can not find disks\n");
+        }
     }
     printf("Found %d storage pool(s):\n", pool_count);
     for (int i = 0; i < pool_count; i++) {
@@ -620,11 +645,20 @@ int main() {
     printf("-----------------------------------DiskPage initial start-----------------------------------\n");
     #endif
     int diskforcount = 0;
-    
-    if(pool_count % 2 == 0)
-        diskforcount = pool_count / 2;
+    if(pool_count != 0)
+    {
+        if(pool_count % 2 == 0)
+            diskforcount = pool_count / 2;
+        else
+            diskforcount = pool_count / 2 + 1;
+    }
     else
-        diskforcount = pool_count / 2 + 1;
+    {
+        if(disk_count % 2 == 0)
+            diskforcount = disk_count / 2;
+        else
+            diskforcount = disk_count / 2 + 1;
+    }
     int diskpage;
     for (int i = 0; i < diskforcount; i++) {
         diskpage = first_init_hidreport(&request, SET, DiskPage_AIM, diskforcount, (i + 1));
@@ -1287,25 +1321,48 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
         }
         return offsetof(Request, system_data.crc) + 1;
     case Disk_AIM:
-        //update pool information
-        get_pool_info(&pools[id]);
-        request->length += sizeof(request->disk_data);
-        request->disk_data.disk_info.disk_id = id;
-        request->disk_data.disk_info.unit = 0x22;
-        // ZvolInfo* zvol =&all_zvols->all_zvols[id];
-        request->disk_data.disk_info.total_size = pools[id].total_size;
-        request->disk_data.disk_info.used_size = pools[id].used_size;
-        if(request->disk_data.disk_info.total_size > 4000)
+        if(pool_count)
         {
-            request->disk_data.disk_info.total_size /= 1024;
-            request->disk_data.disk_info.unit += 1;
+            //update pool information
+            get_pool_info(&pools[id]);
+            request->length += sizeof(request->disk_data);
+            request->disk_data.disk_info.disk_id = id;
+            request->disk_data.disk_info.unit = 0x22;
+            // ZvolInfo* zvol =&all_zvols->all_zvols[id];
+            request->disk_data.disk_info.total_size = pools[id].total_size;
+            request->disk_data.disk_info.used_size = pools[id].used_size;
+            if(request->disk_data.disk_info.total_size > 4000)
+            {
+                request->disk_data.disk_info.total_size /= 1024;
+                request->disk_data.disk_info.unit += 1;
+            }
+            if(request->disk_data.disk_info.used_size > 4000)
+            {
+                request->disk_data.disk_info.used_size /= 1024;
+                request->disk_data.disk_info.unit += 0x10;
+            }
+            request->disk_data.disk_info.temp = pools[id].highest_temp;
         }
-        if(request->disk_data.disk_info.used_size > 4000)
+        else
         {
-            request->disk_data.disk_info.used_size /= 1024;
-            request->disk_data.disk_info.unit += 0x10;
+            request->length += sizeof(request->disk_data);
+            request->disk_data.disk_info.disk_id = id;
+            request->disk_data.disk_info.unit = 0x22;
+            // ZvolInfo* zvol =&all_zvols->all_zvols[id];
+            request->disk_data.disk_info.total_size = disks[id].total_size;
+            request->disk_data.disk_info.used_size = disks[id].used_size;
+            if(request->disk_data.disk_info.total_size > 4000)
+            {
+                request->disk_data.disk_info.total_size /= 1024;
+                request->disk_data.disk_info.unit += 1;
+            }
+            if(request->disk_data.disk_info.used_size > 4000)
+            {
+                request->disk_data.disk_info.used_size /= 1024;
+                request->disk_data.disk_info.unit += 0x10;
+            }
+            request->disk_data.disk_info.temp = disks[id].temperature;
         }
-        request->disk_data.disk_info.temp = pools[id].highest_temp;
         return offsetof(Request, disk_data.crc) + 1;
     // case GPU_AIM:
     //     request->length += sizeof(request->gpu_data);
@@ -1546,87 +1603,174 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
         return offsetof(Request, SystemPage_data.crc) + 1;
     case DiskPage_AIM:
         request->length += sizeof(request->DiskPage_data);
-        request->DiskPage_data.diskcount = pool_count;
         request->DiskPage_data.total = total;
         request->DiskPage_data.order = order;
-        if((pool_count - (order-1)*2) == 1)
+        if(pool_count != 0)
         {
-            request->DiskPage_data.count = 1;
-            request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
-            request->DiskPage_data.diskStruct[0].unit = 0x22;
-            request->DiskPage_data.diskStruct[0].reserve = 0;
-            request->DiskPage_data.diskStruct[0].total_size = pools[(order - 1) * 2].total_size;
-            request->DiskPage_data.diskStruct[0].used_size = pools[(order - 1) * 2].used_size;
-            if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+            request->DiskPage_data.diskcount = pool_count;
+            if((pool_count - (order-1)*2) == 1)
             {
-                request->DiskPage_data.diskStruct[0].total_size /= 1024;
-                request->DiskPage_data.diskStruct[0].unit += 1;
+                request->DiskPage_data.count = 1;
+                request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
+                request->DiskPage_data.diskStruct[0].unit = 0x22;
+                request->DiskPage_data.diskStruct[0].reserve = 0;
+                request->DiskPage_data.diskStruct[0].total_size = pools[(order - 1) * 2].total_size;
+                request->DiskPage_data.diskStruct[0].used_size = pools[(order - 1) * 2].used_size;
+                if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
+                //reserve name
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[0].name[i] = pools[(order - 1) * 2].name[i];
+                }
+                request->DiskPage_data.diskStruct[0].name[sizeof(pools[(order - 1) * 2].name) + 1] = 0;
+                request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
             }
-            if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+            else
             {
-                request->DiskPage_data.diskStruct[0].used_size /= 1024;
-                request->DiskPage_data.diskStruct[0].unit += 0x10;
+                //First
+                request->DiskPage_data.count = 2;
+                request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
+                request->DiskPage_data.diskStruct[0].unit = 0x22;
+                request->DiskPage_data.diskStruct[0].reserve = 0;
+                request->DiskPage_data.diskStruct[0].total_size = pools[(order - 1) * 2].total_size;
+                request->DiskPage_data.diskStruct[0].used_size = pools[(order - 1) * 2].used_size;
+                if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
+                //reserve name
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[0].name[i] = pools[(order - 1) * 2].name[i];
+                }
+                request->DiskPage_data.diskStruct[0].name[sizeof(pools[(order - 1) * 2].name) + 1] = 0;
+                request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
+                //Second
+                request->DiskPage_data.diskStruct[1].disk_id = 1 + (order - 1) * 2;
+                request->DiskPage_data.diskStruct[1].unit = 0x22;
+                request->DiskPage_data.diskStruct[1].reserve = 0;
+                request->DiskPage_data.diskStruct[1].total_size = pools[(order - 1) * 2 + 1].total_size;
+                request->DiskPage_data.diskStruct[1].used_size = pools[(order - 1) * 2 + 1].used_size;
+                if(request->DiskPage_data.diskStruct[1].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[1].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[1].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[1].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[1].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[1].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[1].temp = pools[(order - 1) * 2 + 1].highest_temp;
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[1].name[i] = pools[(order - 1) * 2 + 1].name[i];
+                }
+                request->DiskPage_data.diskStruct[1].name[sizeof(pools[(order - 1) * 2 + 1].name) + 1] = 0;
+                request->DiskPage_data.diskStruct[1].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
             }
-            request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
-            //reserve name
-            for (int i = 0; i < 15; i++)
-            {
-                request->DiskPage_data.diskStruct[0].name[i] = pools[(order - 1) * 2].name[i];
-            }
-            request->DiskPage_data.diskStruct[0].name[sizeof(pools[(order - 1) * 2].name) + 1] = 0;
-            request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
         }
         else
         {
-            //First
-            request->DiskPage_data.count = 2;
-            request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
-            request->DiskPage_data.diskStruct[0].unit = 0x33;
-            request->DiskPage_data.diskStruct[0].reserve = 0;
-            request->DiskPage_data.diskStruct[0].total_size = pools[(order - 1) * 2].total_size;
-            request->DiskPage_data.diskStruct[0].used_size = pools[(order - 1) * 2].used_size;
-            if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+            //linux
+            request->DiskPage_data.diskcount = disk_count;
+            if((disk_count - (order-1)*2) == 1)
             {
-                request->DiskPage_data.diskStruct[0].total_size /= 1024;
-                request->DiskPage_data.diskStruct[0].unit += 1;
+                request->DiskPage_data.count = 1;
+                request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
+                request->DiskPage_data.diskStruct[0].unit = 0x22;
+                request->DiskPage_data.diskStruct[0].reserve = 0;
+                request->DiskPage_data.diskStruct[0].total_size = disks[(order - 1) * 2].total_size;
+                request->DiskPage_data.diskStruct[0].used_size = disks[(order - 1) * 2].used_size;
+                if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[0].temp = disks[(order - 1) * 2].temperature;
+                //reserve name
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[0].name[i] = disks[(order - 1) * 2].device[i];
+                }
+                request->DiskPage_data.diskStruct[0].name[sizeof(disks[(order - 1) * 2].device) + 1] = 0;
+                request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
             }
-            if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+            else
             {
-                request->DiskPage_data.diskStruct[0].used_size /= 1024;
-                request->DiskPage_data.diskStruct[0].unit += 0x10;
+                //First
+                request->DiskPage_data.count = 2;
+                request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
+                request->DiskPage_data.diskStruct[0].unit = 0x22;
+                request->DiskPage_data.diskStruct[0].reserve = 0;
+                request->DiskPage_data.diskStruct[0].total_size = disks[(order - 1) * 2].total_size;
+                request->DiskPage_data.diskStruct[0].used_size = disks[(order - 1) * 2].used_size;
+                if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[0].temp = disks[(order - 1) * 2].temperature;
+                //reserve name
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[0].name[i] = disks[(order - 1) * 2].device[i];
+                }
+                request->DiskPage_data.diskStruct[0].name[sizeof(disks[(order - 1) * 2].device) + 1] = 0;
+                request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
+                //Second
+                request->DiskPage_data.diskStruct[1].disk_id = 1 + (order - 1) * 2;
+                request->DiskPage_data.diskStruct[1].unit = 0x22;
+                request->DiskPage_data.diskStruct[1].reserve = 0;
+                request->DiskPage_data.diskStruct[1].total_size = disks[(order - 1) * 2 + 1].total_size;
+                request->DiskPage_data.diskStruct[1].used_size = disks[(order - 1) * 2 + 1].used_size;
+                if(request->DiskPage_data.diskStruct[1].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[1].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[1].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[1].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[1].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[1].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[1].temp = disks[(order - 1) * 2 + 1].temperature;
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[1].name[i] = disks[(order - 1) * 2 + 1].device[i];
+                }
+                request->DiskPage_data.diskStruct[1].name[sizeof(disks[(order - 1) * 2 + 1].device) + 1] = 0;
+                request->DiskPage_data.diskStruct[1].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
             }
-            request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
-            //reserve name
-            for (int i = 0; i < 15; i++)
-            {
-                request->DiskPage_data.diskStruct[0].name[i] = pools[(order - 1) * 2].name[i];
-            }
-            request->DiskPage_data.diskStruct[0].name[sizeof(pools[(order - 1) * 2].name) + 1] = 0;
-            request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
-            //Second
-            request->DiskPage_data.diskStruct[1].disk_id = 1 + (order - 1) * 2;
-            request->DiskPage_data.diskStruct[1].unit = 0x33;
-            request->DiskPage_data.diskStruct[1].reserve = 0;
-            request->DiskPage_data.diskStruct[1].total_size = pools[(order - 1) * 2 + 1].total_size;
-            request->DiskPage_data.diskStruct[1].used_size = pools[(order - 1) * 2 + 1].used_size;
-            if(request->DiskPage_data.diskStruct[1].total_size > 4000)
-            {
-                request->DiskPage_data.diskStruct[1].total_size /= 1024;
-                request->DiskPage_data.diskStruct[1].unit += 1;
-            }
-            if(request->DiskPage_data.diskStruct[1].used_size > 4000)
-            {
-                request->DiskPage_data.diskStruct[1].used_size /= 1024;
-                request->DiskPage_data.diskStruct[1].unit += 0x10;
-            }
-            request->DiskPage_data.diskStruct[1].temp = pools[(order - 1) * 2 + 1].highest_temp;
-            for (int i = 0; i < 15; i++)
-            {
-                request->DiskPage_data.diskStruct[1].name[i] = pools[(order - 1) * 2 + 1].name[i];
-            }
-            request->DiskPage_data.diskStruct[1].name[sizeof(pools[(order - 1) * 2 + 1].name) + 1] = 0;
-            request->DiskPage_data.diskStruct[1].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
         }
+
         return offsetof(Request, DiskPage_data.crc) + 1;
     case ModePage_AIM:
         request->length += sizeof(request->ModePage_data);
@@ -2923,6 +3067,226 @@ void rescan_all_pools() {
         }
     }
 }
+//Linux get disk information
+// 获取挂载点
+void get_mountpoint(const char *device, char *mountpoint) {
+    FILE *mtab;
+    struct mntent *entry;
+    char full_device[64];
+    
+    // 构建完整的设备路径
+    snprintf(full_device, sizeof(full_device), "/dev/%s", device);
+    
+    mtab = setmntent("/proc/mounts", "r");
+    if (mtab == NULL) {
+        return;
+    }
+    
+    // 查找设备的挂载点
+    while ((entry = getmntent(mtab)) != NULL) {
+        if (strcmp(entry->mnt_fsname, full_device) == 0) {
+            strncpy(mountpoint, entry->mnt_dir, 255);
+            mountpoint[255] = '\0';
+            break;
+        }
+        // 也检查分区（如 sda1, sda2 等）
+        if (strncmp(entry->mnt_fsname, full_device, strlen(full_device)) == 0) {
+            strncpy(mountpoint, entry->mnt_dir, 255);
+            mountpoint[255] = '\0';
+            break;
+        }
+    }
+    
+    endmntent(mtab);
+}
+
+// 获取挂载点使用情况
+int get_mountpoint_usage(const char *mountpoint, unsigned long long *total, 
+                        unsigned long long *free, unsigned long long *used) {
+    struct statvfs buf;
+    if (statvfs(mountpoint, &buf) != 0) {
+        return -1;
+    }
+    
+    *total = (unsigned long long)buf.f_blocks * buf.f_frsize;
+    *free = (unsigned long long)buf.f_bfree * buf.f_frsize;
+    *used = *total - *free;
+    
+    return 0;
+}
+
+// 扫描所有硬盘设备
+int scan_disk_devices(disk_info_t *disks, int max_disks) {
+    DIR *block_dir = opendir("/sys/block");
+    if (!block_dir) {
+        return 0;
+    }
+    
+    struct dirent *entry;
+    int disk_count = 0;
+    
+    while ((entry = readdir(block_dir)) != NULL && disk_count < max_disks) {
+        // 过滤掉虚拟设备和分区
+        if (strncmp(entry->d_name, "loop", 4) == 0 ||
+            strncmp(entry->d_name, "ram", 3) == 0 ||
+            strncmp(entry->d_name, "fd", 2) == 0 ||
+            strchr(entry->d_name, 'p') != NULL) { // 排除分区
+            continue;
+        }
+        
+        // 只关注SATA和NVMe设备
+        if (strncmp(entry->d_name, "sd", 2) == 0 || 
+            strncmp(entry->d_name, "nvme", 4) == 0) {
+            char removable_path[512];
+            snprintf(removable_path, sizeof(removable_path), 
+                    "/sys/block/%s/removable", entry->d_name);
+            
+            FILE *removable_file = fopen(removable_path, "r");
+            if (removable_file) {
+                char removable;
+                if (fscanf(removable_file, "%c", &removable) == 1 && removable == '1') {
+                    fclose(removable_file);
+                    continue;  // 跳过U盘
+                }
+                fclose(removable_file);
+            }
+            strncpy(disks[disk_count].device, entry->d_name, 32);
+            
+            // 确定硬盘类型
+            if (strncmp(entry->d_name, "nvme", 4) == 0) {
+                strcpy(disks[disk_count].type, "NVMe");
+            } else {
+                strcpy(disks[disk_count].type, "SATA");
+            }
+            
+            // 获取基本信息
+            get_disk_identity(entry->d_name, 
+                            disks[disk_count].model, 
+                            disks[disk_count].serial);
+            
+            disks[disk_count].total_size = get_disk_size(entry->d_name)/1024/1024/1024;//Change to Gb
+            get_mountpoint(entry->d_name, disks[disk_count].mountpoint);
+            // 如果有挂载点，获取使用情况
+            if (strlen(disks[disk_count].mountpoint) > 0) {
+                
+                unsigned long long total, free, used;
+                if (get_mountpoint_usage(disks[disk_count].mountpoint, &total, &free, &used) == 0) {
+                    disks[disk_count].free_size = free/1024/1024/1024;//Change to Gb
+                    disks[disk_count].used_size = used/1024/1024/1024;//Change to Gb
+                    if (total > 0) {
+                        disks[disk_count].usage_percent = ((double)used / total) * 100.0;
+                    }
+                }
+            }
+            
+            // 获取温度
+            disks[disk_count].temperature = get_disk_temperature(entry->d_name);
+            
+            disk_count++;
+        }
+    }
+    
+    closedir(block_dir);
+    return disk_count;
+}
+// 获取硬盘型号和序列号
+void get_disk_identity(const char *device, char *model, char *serial) {
+    char path[MAX_PATH];
+    
+    // 获取型号
+    if (strncmp(device, "nvme", 4) == 0) {
+        snprintf(path, sizeof(path), "/sys/class/nvme/%s/model", device);
+    } else {
+        snprintf(path, sizeof(path), "/sys/block/%s/device/model", device);
+    }
+    
+    if (read_file(path, model, 128) != 0) {
+        strcpy(model, "Unknown");
+    } else {
+        // 去除换行符
+        model[strcspn(model, "\n")] = 0;
+    }
+    
+    // 获取序列号
+    if (strncmp(device, "nvme", 4) == 0) {
+        snprintf(path, sizeof(path), "/sys/class/nvme/%s/serial", device);
+    } else {
+        snprintf(path, sizeof(path), "/sys/block/%s/device/serial", device);
+    }
+    
+    if (read_file(path, serial, 64) != 0) {
+        strcpy(serial, "Unknown");
+    } else {
+        serial[strcspn(serial, "\n")] = 0;
+    }
+}
+
+// 获取硬盘总容量
+unsigned long long get_disk_size(const char *device) {
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "/sys/block/%s/size", device);
+    
+    char size_str[32];
+    if (read_file(path, size_str, sizeof(size_str)) == 0) {
+        unsigned long long sectors = strtoull(size_str, NULL, 10);
+        return sectors * 512; // 转换为字节
+    }
+    return 0;
+}
+
+int update_disk_usage(disk_info_t *disk) {
+    if (!disk || strlen(disk->device) == 0) {
+        return -1;
+    }
+    
+    // 获取挂载点
+    char mountpoint[256] = {0};
+    get_mountpoint(disk->device, mountpoint);
+    
+    // 更新挂载点
+    strncpy(disk->mountpoint, mountpoint, sizeof(disk->mountpoint) - 1);
+    
+    // 如果有挂载点，获取使用情况
+    if (strlen(mountpoint) > 0) {
+        unsigned long long total, free, used;
+        if (get_mountpoint_usage(mountpoint, &total, &free, &used) == 0) {
+            disk->free_size = free / 1024 / 1024 / 1024;  // 转换为GB
+            disk->used_size = used / 1024 / 1024 / 1024;  // 转换为GB
+            if (total > 0) {
+                disk->usage_percent = ((double)used / total) * 100.0;
+            }
+            return 0;
+        }
+    }
+    
+    return -1;
+}
+int update_disk_temperature(disk_info_t *disk) {
+    if (!disk || strlen(disk->device) == 0) {
+        return -1;
+    }
+    
+    int temp = get_disk_temperature(disk->device);
+    if (temp >= 0) {  // 假设温度有效值为非负数
+        disk->temperature = temp;
+        return 0;
+    }
+    
+    return -1;
+}
+int refresh_linux_disks(disk_info_t *disks, int count) {
+    int updated = 0;
+    for (int i = 0; i < count; i++) {
+        if (update_disk_usage(&disks[i]) == 0) {
+            updated++;
+        }
+        if (update_disk_temperature(&disks[i]) == 0) {
+            updated++;
+        }
+    }
+    updated /= 2;
+    return updated;
+}
 
 int GetUserCount()
 {
@@ -2942,10 +3306,6 @@ int GetUserCount()
     pclose(fp);
     return count;
 }
-
-
-
-
 
 //6266 CMD
 // 获取 I/O 端口权限
@@ -3526,31 +3886,56 @@ void* usb_send_thread(void* arg) {
             if(local_hour_time_div % 60 == 0)
             {
                 //1 Min Do
-                for (int i = 0; i < pool_count; i++) {
-                    int diskreportsize = init_hidreport(&request, SET, Disk_AIM, i);
-                    append_crc(&request);
-                    memcpy(buffer, &request, diskreportsize);
-                    if (safe_usb_write(buffer, diskreportsize) == -1) {
-                    printf("Failed to write Disk data\n");
-                    break;
-                    }
-                    #if DebugToken
-                    printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
-                    #endif
-                    printf("diskreportsize: %d\n",diskreportsize);
-                    printf("DiskId: %d\n",request.disk_data.disk_info.disk_id);
-                    printf("Diskunit: %d\n",request.disk_data.disk_info.unit);
-                    printf("Disktotal: %d\n",request.disk_data.disk_info.total_size);
-                    printf("Diskused: %d\n",request.disk_data.disk_info.used_size);
-                    printf("Disktemp: %d\n",request.disk_data.disk_info.temp);
-                    printf("DiskCRC: %d\n",request.disk_data.crc);
-                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
-    memset(&request, 0x0, sizeof(Request));
-                    // 休眠1秒，但分段休眠以便及时响应退出
-                    for (int i = 0; i < 10 && running; i++) {
-                        usleep(100000); // 100ms
+                if(pool_count)
+                {
+                    for (int i = 0; i < pool_count; i++) {
+                        int diskreportsize = init_hidreport(&request, SET, Disk_AIM, i);
+                        append_crc(&request);
+                        memcpy(buffer, &request, diskreportsize);
+                        if (safe_usb_write(buffer, diskreportsize) == -1) {
+                        printf("Failed to write Disk data\n");
+                        break;
+                        }
+                        #if DebugToken
+                        printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
+                        #endif
+                        printf("diskreportsize: %d\n",diskreportsize);
+                        printf("DiskId: %d\n",request.disk_data.disk_info.disk_id);
+                        printf("Diskunit: %d\n",request.disk_data.disk_info.unit);
+                        printf("Disktotal: %d\n",request.disk_data.disk_info.total_size);
+                        printf("Diskused: %d\n",request.disk_data.disk_info.used_size);
+                        printf("Disktemp: %d\n",request.disk_data.disk_info.temp);
+                        printf("DiskCRC: %d\n",request.disk_data.crc);
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+                        memset(&request, 0x0, sizeof(Request));
+                        // 休眠1秒，但分段休眠以便及时响应退出
+                        for (int i = 0; i < 10 && running; i++) {
+                            usleep(100000); // 100ms
+                        }
                     }
                 }
+                else
+                {
+                    refresh_linux_disks(disks,disk_count);
+                    for (int i = 0; i < disk_count; i++)
+                    {
+                        int diskreportsize = init_hidreport(&request, SET, Disk_AIM, i);
+                        append_crc(&request);
+                        memcpy(buffer, &request, diskreportsize);
+                        if (safe_usb_write(buffer, diskreportsize) == -1) {
+                        printf("Failed to write Disk data\n");
+                        break;
+                        }
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+                        memset(&request, 0x0, sizeof(Request));
+                        // 休眠1秒，但分段休眠以便及时响应退出
+                        for (int i = 0; i < 10 && running; i++) {
+                            usleep(100000); // 100ms
+                        }
+                    }
+                    
+                }
+
             }
             if(local_hour_time_div % 600 == 0)
             {
@@ -3846,54 +4231,62 @@ memset(&request, 0x0, sizeof(Request));
             #endif
             int diskforcount = 0;
             
-            if(pool_count % 2 == 0)
-                diskforcount = pool_count / 2;
-            else
-                diskforcount = pool_count / 2 + 1;
-            int diskpage;
-            for (int i = 0; i < diskforcount; i++) {
-                diskpage = first_init_hidreport(&request, SET, DiskPage_AIM, diskforcount, (i + 1));
-                append_crc(&request);
+            if(pool_count != 0)
+            {
+                if(pool_count % 2 == 0)
+                    diskforcount = pool_count / 2;
+                else
+                    diskforcount = pool_count / 2 + 1;
+                int diskpage;
+                for (int i = 0; i < diskforcount; i++) {
+                    diskpage = first_init_hidreport(&request, SET, DiskPage_AIM, diskforcount, (i + 1));
+                    append_crc(&request);
 
-                #if DebugToken
-                printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
-                printf("Diskpage Head: %x\n",request.header);
-                printf("sequence %d\n",request.sequence);
-                printf("lenth %d\n",request.length);
-                printf("cmd %d\n",request.cmd);
-                printf("aim %d\n",request.aim);
-                printf("order %d\n",request.DiskPage_data.order);
-                printf("total: %d\n \n",request.DiskPage_data.total);
-                printf("diskcount %d\n",request.DiskPage_data.diskcount);
-                printf("count: %d\n",request.DiskPage_data.count);
-                printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[0].disklength);
-                printf("Diskid: %d\n",request.DiskPage_data.diskStruct[0].disk_id);
-                printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[0].unit);
-                printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[0].total_size);
-                printf("Diskused: %d\n",request.DiskPage_data.diskStruct[0].used_size);
-                printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[0].temp);
-                printf("Diskname: %s\n",request.DiskPage_data.diskStruct[0].name);
-                if(pool_count-(i*2)>1)
-                {
-                    printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[1].disklength);
-                    printf("Diskid: %d\n",request.DiskPage_data.diskStruct[1].disk_id);
-                    printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[1].unit);
-                    printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[1].total_size);
-                    printf("Diskused: %d\n",request.DiskPage_data.diskStruct[1].used_size);
-                    printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[1].temp);
-                    printf("Diskname: %s\n",request.DiskPage_data.diskStruct[1].name);
+                    #if DebugToken
+                    printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
+                    printf("Diskpage Head: %x\n",request.header);
+                    printf("sequence %d\n",request.sequence);
+                    printf("lenth %d\n",request.length);
+                    printf("cmd %d\n",request.cmd);
+                    printf("aim %d\n",request.aim);
+                    printf("order %d\n",request.DiskPage_data.order);
+                    printf("total: %d\n \n",request.DiskPage_data.total);
+                    printf("diskcount %d\n",request.DiskPage_data.diskcount);
+                    printf("count: %d\n",request.DiskPage_data.count);
+                    printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[0].disklength);
+                    printf("Diskid: %d\n",request.DiskPage_data.diskStruct[0].disk_id);
+                    printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[0].unit);
+                    printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[0].total_size);
+                    printf("Diskused: %d\n",request.DiskPage_data.diskStruct[0].used_size);
+                    printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[0].temp);
+                    printf("Diskname: %s\n",request.DiskPage_data.diskStruct[0].name);
+                    if(pool_count-(i*2)>1)
+                    {
+                        printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[1].disklength);
+                        printf("Diskid: %d\n",request.DiskPage_data.diskStruct[1].disk_id);
+                        printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[1].unit);
+                        printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[1].total_size);
+                        printf("Diskused: %d\n",request.DiskPage_data.diskStruct[1].used_size);
+                        printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[1].temp);
+                        printf("Diskname: %s\n",request.DiskPage_data.diskStruct[1].name);
+                    }
+                    printf("CRC:%d\n",request.DiskPage_data.crc);
+                    printf("Send %d time\n",(i+1));
+                    #endif
+                            if (safe_usb_write(buffer, diskpage) == -1) {
+                    printf("Failed to write DiskPage data\n");
+                    break;
+                    }
+                    sleep(1);
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+                    memset(&request, 0x0, sizeof(Request));
                 }
-                printf("CRC:%d\n",request.DiskPage_data.crc);
-                printf("Send %d time\n",(i+1));
-                #endif
-                        if (safe_usb_write(buffer, diskpage) == -1) {
-                printf("Failed to write DiskPage data\n");
-                break;
-                }
-                sleep(1);
-                memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
-    memset(&request, 0x0, sizeof(Request));
             }
+            else
+            {
+                
+            }
+            
             #if DebugToken
             printf("-----------------------------------DiskPage initial end-----------------------------------\n");
             #endif
