@@ -55,6 +55,7 @@
 #define IfNoPanel   false
 #define hidwritedebug true
 #define OTA             true
+#define FIRMWARE_PATH "/usr/share/harboros-subscreen/firmware"
 #define MAXLEN 0x40
 #define DURATION 1
 #define MAX_PATH 256
@@ -548,7 +549,7 @@ int main() {
     firmware_upgrader_init(&upgrader);
     int result = -1;
     // 执行升级
-    result = firmware_upgrade(&upgrader, "./firmware", 0, 2, 1, 1);
+    result = firmware_upgrade(&upgrader, FIRMWARE_PATH, 0, 2, 1, 1);
     
     if (result == 0) {
         printf("No need Update!!\n");
