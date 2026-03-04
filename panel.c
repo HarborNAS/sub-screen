@@ -456,11 +456,11 @@ int initialUSB()
     libusb_clear_halt(handle, EP_IN);
 
 
-    if (start_usb_read_thread() != 0) {
-        printf("Failed to start USB read thread\n");
-    } else {
-        printf("USB read thread started successfully\n");
-    }
+    // if (start_usb_read_thread() != 0) {
+    //     printf("Failed to start USB read thread\n");
+    // } else {
+    //     printf("USB read thread started successfully\n");
+    // }
 }
 // 在主函数发送数据前，先测试读取
 int main() {
@@ -477,6 +477,15 @@ int main() {
     if (safe_usb_write(buffer, otapage)  < 0) {
         printf("Failed to write Time data\n");
     }
+    unsigned char response[64];
+    int read_len = safe_usb_read(response, 64, 1500);
+    if (read_len > 0) {
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);  // 打印16进制数据
+        }
+        printf("\n");
+    }
+    memset(response,0x0,64);
     // 休眠1秒，但分段休眠以便及时响应退出
     for (int i = 0; i < 10; i++) {
         usleep(100000); // 100ms
@@ -491,6 +500,18 @@ int main() {
     if (safe_usb_write(buffer, otapage) == -1) {
         printf("Failed to write otapage data\n");
     }
+    read_len = safe_usb_read(response, 64, 1500);
+    if (read_len > 0) {
+        Ver[0] = response[5];
+        Ver[1] = response[6];
+        Ver[2] = response[7];
+        Ver[3] = response[8];
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);  // 打印16进制数据
+        }
+        printf("\n");
+    }
+    memset(response,0x0,64);
     // 休眠1秒，但分段休眠以便及时响应退出
     for (int i = 0; i < 10; i++) {
         usleep(100000); // 100ms
@@ -504,6 +525,18 @@ int main() {
     if (safe_usb_write(buffer, otapage) == -1) {
         printf("Failed to write otapage data\n");
     }
+    read_len = safe_usb_read(response, 64, 1500);
+    if (read_len > 0) {
+        Ver[0] = response[5];
+        Ver[1] = response[6];
+        Ver[2] = response[7];
+        Ver[3] = response[8];
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);  // 打印16进制数据
+        }
+        printf("\n");
+    }
+     memset(response,0x0,64);
     // 休眠5秒，但分段休眠以便及时响应退出
     for (int i = 0; i < 10; i++) {
         usleep(100000); // 100ms
@@ -515,7 +548,7 @@ int main() {
     firmware_upgrader_init(&upgrader);
     int result = -1;
     // 执行升级
-    result = firmware_upgrade(&upgrader, "./firmware", 0, 2, 1, 0);
+    result = firmware_upgrade(&upgrader, "./firmware", 0, 2, 1, 1);
     
     if (result == 0) {
         printf("No need Update!!\n");
@@ -560,7 +593,11 @@ int main() {
         printf("Update Fail!!\n");
     }
     OTAEnable = false;
-
+    if (start_usb_read_thread() != 0) {
+        printf("Failed to start USB read thread\n");
+    } else {
+        printf("USB read thread started successfully\n");
+    }
     IsNvidiaGPU = nvidia_smi_available();
     // 扫描所有物理网络接口
     if (init_network_monitor() < 0) {
@@ -975,41 +1012,85 @@ int send_firmware_data(FirmwareUpgrader* upgrader,
         uint32_t remaining = total_size - sent_size;
         int send_len = (remaining < chunk_size) ? remaining : chunk_size;
         
-        // 复制数据到chunk
-        memcpy(chunk, firmware + sent_size, send_len);
-        
-        // 构建请求包
-        memset(&request, 0, sizeof(Request));
-        request.header = SIGNATURE;
-        request.cmd = UPDATE;
-        request.aim = Updatefw_AIM;
-        request.sequence = get_next_sequence(upgrader);
-        
-        // 复制数据到请求结构
-        memcpy(request.OTA_data.data, chunk, send_len);
-        
-        // 计算数据长度
-        request.length =  COMMLEN + sizeof(request.OTA_data);
-        
-        // 计算包长度
-        int packet_len = offsetof(Request, OTA_data.crc) + 1;  // +1 for CRC
-        // 计算并添加CRC
-        append_crc(&request);
-        // 发送请求
-        memcpy(buffer, &request, packet_len);
-        if (safe_usb_write(buffer, packet_len) < 0) {
-            printf("\n[错误] 发送固件数据失败\n");
+        // === 动态计算包大小 ===
+        int data_len = COMMLEN + send_len + 1;
+        int packet_len = 6 + send_len + 1;
+        unsigned char* packet = (unsigned char*)malloc(packet_len);
+        if (!packet) {
+            printf("\n[Error] memory malloc fail\n");
             return -1;
         }
+        
+        // 填充包头
+        packet[0] = 0xA5;
+        packet[1] = 0x5A;
+        packet[2] = get_next_sequence(upgrader);
+        packet[3] = data_len;      
+        packet[4] = UPDATE;           
+        packet[5] = Updatefw_AIM;
+        // 复制数据
+        memcpy(packet + 6, firmware + sent_size, send_len);
+        // 计算CRC（从开头到数据末尾）
+        unsigned short crc_sum = 0;
+        for (int i = 0; i < packet_len - 1; i++) {
+            crc_sum += packet[i];
+        }
+        packet[packet_len - 1] = (unsigned char)(crc_sum & 0xFF);  // CRC放在最后
+        // 调试输出
+        printf("\n[包%d] seq=%d, data=%d, packet=%d, crc=0x%02X\n", 
+               sent_size / chunk_size + 1,
+               packet[2], send_len, packet_len, packet[packet_len - 1]);
+        printf("\n");
+        // // 复制数据到请求结构
+        // memcpy(request.OTA_data.data, chunk, send_len);
+        // // 计算数据长度
+        // request.length = COMMLEN + send_len +1;
+        // append_ota_crc_dynamic(&request, send_len);
+        // // 计算包长度
+        // int packet_len = 6 + send_len + 1;
+        // // 调试信息
+        // printf("\n[包%d] seq=%d, data=%d, packet=%d, crc=0x%02X\n", 
+        //        sent_size / chunk_size + 1,
+        //        request.sequence, send_len, packet_len, request.OTA_data.crc);
+        
+        // 发送请求
+        if (safe_usb_write(packet, packet_len) < 0) {
+            printf("\n[错误] 发送固件数据失败\n");
+            free(packet);
+            return -1;
+        }
+        free(packet);
+        // memcpy(buffer, &request, packet_len);
+        // if (safe_usb_write(buffer, packet_len) < 0) {
+        //     printf("\n[错误] 发送固件数据失败\n");
+        //     return -1;
+        // }
 
         // 等待设备响应
-        int read_len = safe_usb_read(response, 64, 150);
+        int read_len = safe_usb_read(response, 64, 1500);
         if (read_len > 0) {
-            printf(">>> Received %d bytes:\n", read_len);
-            for (int i = 0; i < read_len; i++) {
-                printf("%02X ", response[i]);
-                if ((i + 1) % 16 == 0) printf("\n");
+            if (response[5]) {
+                    // != 0 Fail
+                printf(">>> Received %d bytes:\n", read_len);
+                for (int i = 0; i < read_len; i++) {
+                    printf("%02X ", response[i]);  // 打印16进制数据
+                }
+                printf("\n");
+                printf("Failed to send OTA data,:%d\n",response[5]);
+                return -1;
+            } else {
+                printf(">>> Received %d bytes:\n", read_len);
+                for (int i = 0; i < read_len; i++) {
+                    printf("%02X ", response[i]);  // 打印16进制数据
+                }
+                printf("\n");
+                printf(">>>Success to send data\n" );
             }
+        }
+        else
+        {
+            printf("Failed to send OTA data\n");
+                return -1;
         }
         printf("\n");
         sent_size += send_len;
@@ -1067,17 +1148,18 @@ int send_finish_signal(FirmwareUpgrader* upgrader) {
     // 等待设备响应
     int read_len = safe_usb_read(response, 64, 5000);
     if (read_len > 0) {
-        // if (parse_response(response, read_len, response_data, &data_len, &error_code) == 0) {
-        //     if (data_len >= 1) {
-        //         if (error_code == 0) {
-        //             printf("[成功] 升级完成，设备即将重启...\n");
-        //             return 0;
-        //         } else {
-        //             printf("[错误] 完成升级失败, 错误码: %d\n", error_code);
-        //             return -1;
-        //         }
-        //     }
-        // }
+            if (response[5]) {
+                    // != 0 Fail
+                printf(">>> Received %d bytes:\n", read_len);
+                for (int i = 0; i < read_len; i++) {
+                    printf("%02X ", response[i]);  // 打印16进制数据
+                }
+                printf("\n");
+                printf("Failed to restart,:%d\n",response[5]);
+                return -1;
+            } else {
+                printf(">>>Success to restart\n" );
+            }
     }
     
     printf("[MSG] 设备可能已重启\n");
@@ -1128,6 +1210,13 @@ int send_upgrade_info(FirmwareUpgrader* upgrader,
     }
     memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
     memset(&request, 0x0, sizeof(Request));
+    int read_len = safe_usb_read(response, 64, 1500);
+    if (read_len > 0) {
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);  // 打印16进制数据
+        }
+        printf("\n");
+    }
     // 休眠5秒，但分段休眠以便及时响应退出
     for (int i = 0; i < 50 && running; i++) {
         usleep(100000); // 100ms
