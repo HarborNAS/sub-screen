@@ -984,6 +984,7 @@ int safe_usb_read(unsigned char* buffer, int length, int timeout_ms) {
         return -1;  // 返回错误
     }
 }
+
 // 发送固件数据
 int send_firmware_data(FirmwareUpgrader* upgrader, 
                        const unsigned char* firmware, 
@@ -1034,25 +1035,13 @@ int send_firmware_data(FirmwareUpgrader* upgrader,
         unsigned short crc_sum = 0;
         for (int i = 0; i < packet_len - 1; i++) {
             crc_sum += packet[i];
+            printf("%02X ", packet[i]);
         }
         packet[packet_len - 1] = (unsigned char)(crc_sum & 0xFF);  // CRC放在最后
         // 调试输出
         printf("\n[包%d] seq=%d, data=%d, packet=%d, crc=0x%02X\n", 
                sent_size / chunk_size + 1,
                packet[2], send_len, packet_len, packet[packet_len - 1]);
-        printf("\n");
-        // // 复制数据到请求结构
-        // memcpy(request.OTA_data.data, chunk, send_len);
-        // // 计算数据长度
-        // request.length = COMMLEN + send_len +1;
-        // append_ota_crc_dynamic(&request, send_len);
-        // // 计算包长度
-        // int packet_len = 6 + send_len + 1;
-        // // 调试信息
-        // printf("\n[包%d] seq=%d, data=%d, packet=%d, crc=0x%02X\n", 
-        //        sent_size / chunk_size + 1,
-        //        request.sequence, send_len, packet_len, request.OTA_data.crc);
-        
         // 发送请求
         if (safe_usb_write(packet, packet_len) < 0) {
             printf("\n[错误] 发送固件数据失败\n");
@@ -1060,11 +1049,6 @@ int send_firmware_data(FirmwareUpgrader* upgrader,
             return -1;
         }
         free(packet);
-        // memcpy(buffer, &request, packet_len);
-        // if (safe_usb_write(buffer, packet_len) < 0) {
-        //     printf("\n[错误] 发送固件数据失败\n");
-        //     return -1;
-        // }
 
         // 等待设备响应
         int read_len = safe_usb_read(response, 64, 1500);
@@ -1092,7 +1076,6 @@ int send_firmware_data(FirmwareUpgrader* upgrader,
             printf("Failed to send OTA data\n");
                 return -1;
         }
-        printf("\n");
         sent_size += send_len;
         
         // 计算和显示进度
