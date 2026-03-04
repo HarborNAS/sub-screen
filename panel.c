@@ -55,7 +55,7 @@
 #define IfNoPanel   false
 #define hidwritedebug true
 #define OTA             true
-#define FIRMWARE_PATH "/usr/share/harboros-subscreen/firmware"
+#define FIRMWARE_PATH "/usr/bin/firmware"
 #define MAXLEN 0x40
 #define DURATION 1
 #define MAX_PATH 256
