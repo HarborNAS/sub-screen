@@ -3367,7 +3367,8 @@ int GetUserCount()
     char buffer[1024];
     int count = 0;
     
-    fp = popen("who | wc -l", "r");
+    // 统计所有通过网络连接的会话
+    fp = popen("who | grep -E '\\([0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\)$' | wc -l", "r");
     if (fp == NULL) {
         return -1;
     }
