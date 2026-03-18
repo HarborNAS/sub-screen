@@ -549,7 +549,7 @@ int main() {
     firmware_upgrader_init(&upgrader);
     int result = -1;
     // 执行升级
-    result = firmware_upgrade(&upgrader, FIRMWARE_PATH, 0, 2, 1, 2);
+    result = firmware_upgrade(&upgrader, FIRMWARE_PATH, 0, 3, 1, 0);
     
     if (result == 0) {
         printf("No need Update!!\n");
