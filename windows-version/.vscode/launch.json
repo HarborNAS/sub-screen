@@ -1,0 +1,27 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug Console Mode",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/subscreen.exe",
+            "args": ["console"],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debug Service",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/subscreen.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "console": "integratedTerminal"
+        }
+    ]
+}

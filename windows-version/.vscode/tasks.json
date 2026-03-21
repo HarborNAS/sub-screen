@@ -1,0 +1,52 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build",
+            "type": "shell",
+            "command": "cl.exe",
+            "args": [
+                "/EHsc",
+                "/Fe:subscreen.exe",
+                "/Iinclude",
+                "src/main.c",
+                "src/system_monitor.c",
+                "src/usb_comm.c",
+                "src/service.c",
+                "src/protocol.c",
+                "hid.lib",
+                "setupapi.lib",
+                "pdh.lib",
+                "psapi.lib",
+                "iphlpapi.lib",
+                "ws2_32.lib",
+                "ole32.lib",
+                "oleaut32.lib",
+                "wbemuuid.lib",
+                "powrprof.lib"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "silent",
+                "focus": false,
+                "panel": "shared"
+            },
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "clean",
+            "type": "shell",
+            "command": "del",
+            "args": [
+                "*.exe",
+                "*.obj",
+                "*.pdb"
+            ],
+            "group": "build"
+        }
+    ]
+}
