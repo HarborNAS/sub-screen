@@ -2,3 +2,4 @@ panel
 protocol
 /.idea
 .DS_Store
+.github/copilot-instructions.md
