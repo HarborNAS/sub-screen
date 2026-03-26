@@ -31,7 +31,7 @@ jobs:
           VERSION="${{ inputs.tag }}"
           PKG_NAME="harboros-subscreen_${VERSION}_linux_amd64"
           PKG_DIR="./deb-package/${PKG_NAME}"
-
+          mkdir -p /usr/lib/systemd/system-sleep/
           mkdir -p ${PKG_DIR}/DEBIAN
           mkdir -p ${PKG_DIR}/usr/bin
           mkdir -p ${PKG_DIR}/etc/systemd/system
