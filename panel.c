@@ -959,7 +959,7 @@ void TimeSleep1Sec()
         HourTimeDiv = 0;
     HourTimeDiv ++;
     pthread_mutex_unlock(&hour_time_mutex);
-    printf("Time:%ld\n",(get_local_timestamp());
+    printf("Time:%ld\n",get_local_timestamp());
     // 休眠1秒，但分段休眠以便及时响应退出
     for (int i = 0; i < 10 && running; i++) {
         usleep(100000); // 100ms
