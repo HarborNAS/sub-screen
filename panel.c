@@ -133,6 +133,7 @@ int firmware_upgrade(FirmwareUpgrader* upgrader,
                      unsigned char new_patch, unsigned char new_build);
 int init_hidreport(Request *request, unsigned char cmd, unsigned char aim, unsigned char id);
 time_t get_local_timestamp();
+int get_tz_offset();
 int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char total,unsigned char order);
 void append_crc(Request *request);
 void appendEmpty_crc(Request *request);
@@ -959,7 +960,7 @@ void TimeSleep1Sec()
         HourTimeDiv = 0;
     HourTimeDiv ++;
     pthread_mutex_unlock(&hour_time_mutex);
-    printf("Time:%ld\n",get_local_timestamp());
+    printf("Time:%ld\n",get_local_timestamp() + get_tz_offset());
     // 休眠1秒，但分段休眠以便及时响应退出
     for (int i = 0; i < 10 && running; i++) {
         usleep(100000); // 100ms
@@ -1330,6 +1331,37 @@ time_t get_local_timestamp() {
     struct tm *local = localtime(&now);
     return mktime(local);
 }
+int get_tz_offset(void) {
+    time_t now = time(NULL);
+    struct tm local, gmt;
+    
+    localtime_r(&now, &local);  // 本地时间
+    gmtime_r(&now, &gmt);       // UTC 时间
+    
+    // 计算时差（秒）
+    int offset = (local.tm_hour - gmt.tm_hour) * 3600;
+    
+    // 处理分钟差异（有些时区有半小时或45分钟）
+    offset += (local.tm_min - gmt.tm_min) * 60;
+    
+    // 处理日期边界（跨日情况）
+    if (local.tm_yday != gmt.tm_yday) {
+        if (local.tm_yday > gmt.tm_yday)
+            offset += 86400;   // 本地比 UTC 快一天
+        else
+            offset -= 86400;   // 本地比 UTC 慢一天
+    }
+    
+    // 处理年份边界
+    if (local.tm_year != gmt.tm_year) {
+        if (local.tm_year > gmt.tm_year)
+            offset += 86400;
+        else
+            offset -= 86400;
+    }
+    
+    return offset;
+}
 int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char id) {
     request->header = SIGNATURE;
     request->cmd = cmd;
@@ -1340,7 +1372,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
     {
     case TIME_AIM:
         request->length += sizeof(request->time_data);
-        request->time_data.time_info.timestamp = get_local_timestamp();
+        request->time_data.time_info.timestamp = get_local_timestamp() + get_tz_offset();
         return offsetof(Request, time_data.crc) + 1;
     case System_AIM:
         request->length += sizeof(request->system_data);
@@ -1604,7 +1636,7 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
     {
     case HomePage_AIM:
         request->length += sizeof(request->Homepage_data);
-        request->Homepage_data.time_info.timestamp = get_local_timestamp();
+        request->Homepage_data.time_info.timestamp = get_local_timestamp() + get_tz_offset();
         request->Homepage_data.total = total;
         request->Homepage_data.order = order;
         return offsetof(Request, Homepage_data.crc) + 1;
