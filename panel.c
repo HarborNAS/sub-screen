@@ -132,6 +132,7 @@ int firmware_upgrade(FirmwareUpgrader* upgrader,
                      unsigned char new_major, unsigned char new_minor,
                      unsigned char new_patch, unsigned char new_build);
 int init_hidreport(Request *request, unsigned char cmd, unsigned char aim, unsigned char id);
+time_t get_local_timestamp();
 int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char total,unsigned char order);
 void append_crc(Request *request);
 void appendEmpty_crc(Request *request);
@@ -958,7 +959,7 @@ void TimeSleep1Sec()
         HourTimeDiv = 0;
     HourTimeDiv ++;
     pthread_mutex_unlock(&hour_time_mutex);
-    printf("Time:%ld\n",(time(NULL) + 28800));
+    printf("Time:%ld\n",(get_local_timestamp());
     // 休眠1秒，但分段休眠以便及时响应退出
     for (int i = 0; i < 10 && running; i++) {
         usleep(100000); // 100ms
@@ -1324,7 +1325,11 @@ int firmware_upgrade(FirmwareUpgrader* upgrader,
     printf("============================================================\n");
     return 1;
 }
-
+time_t get_local_timestamp() {
+    time_t now = time(NULL);
+    struct tm *local = localtime(&now);
+    return mktime(local);
+}
 int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char id) {
     request->header = SIGNATURE;
     request->cmd = cmd;
@@ -1335,7 +1340,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsign
     {
     case TIME_AIM:
         request->length += sizeof(request->time_data);
-        request->time_data.time_info.timestamp = time(NULL) + 28800;
+        request->time_data.time_info.timestamp = get_local_timestamp();
         return offsetof(Request, time_data.crc) + 1;
     case System_AIM:
         request->length += sizeof(request->system_data);
@@ -1599,7 +1604,7 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
     {
     case HomePage_AIM:
         request->length += sizeof(request->Homepage_data);
-        request->Homepage_data.time_info.timestamp = time(NULL) + 28800;
+        request->Homepage_data.time_info.timestamp = get_local_timestamp();
         request->Homepage_data.total = total;
         request->Homepage_data.order = order;
         return offsetof(Request, Homepage_data.crc) + 1;
