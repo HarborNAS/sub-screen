@@ -1,0 +1,4 @@
+#include "include\\setup_resource.h"
+
+1 RT_MANIFEST "src\\setup.manifest"
+IDR_SUBSCREEN_EXE RCDATA "build\\Release\\subscreen.exe"

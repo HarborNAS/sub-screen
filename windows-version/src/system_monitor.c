@@ -1,85 +1,104 @@
 #include "system_monitor.h"
-#include <windows.h>
-#include <stdio.h>
-#include <psapi.h>
-#include <pdh.h>
-#include <pdhmsg.h>
-#include <iphlpapi.h>
-#include <ws2tcpip.h>
-#include <wbemidl.h>
-#include <comdef.h>
-#include <Wbemidl.h>
-#include <oleauto.h>
-#include <powrprof.h>
-#include <tlhelp32.h>
 
+#include <ws2def.h>
+#include <ws2ipdef.h>
+#include <iphlpapi.h>
+#include <pdh.h>
+#include <psapi.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <ws2tcpip.h>
+
+#pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "pdh.lib")
 #pragma comment(lib, "psapi.lib")
-#pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
-#pragma comment(lib, "ole32.lib")
-#pragma comment(lib, "oleaut32.lib")
-#pragma comment(lib, "wbemuuid.lib")
-#pragma comment(lib, "powrprof.lib")
 
-// Global variables for performance monitoring
-static PDH_HQUERY cpuQuery = NULL;
-static PDH_HCOUNTER cpuTotal = NULL;
-static PDH_HQUERY networkQuery = NULL;
-static PDH_HCOUNTER networkTotal = NULL;
-static ULARGE_INTEGER lastNetworkIn = {0};
-static ULARGE_INTEGER lastNetworkOut = {0};
-static DWORD lastNetworkTime = 0;
+typedef LONG (WINAPI* RtlGetVersionFn)(PRTL_OSVERSIONINFOW);
+typedef int (*NvmlInitFn)(void);
+typedef int (*NvmlShutdownFn)(void);
+typedef int (*NvmlDeviceGetHandleByIndexFn)(unsigned int index, void** device);
+typedef int (*NvmlDeviceGetTemperatureFn)(void* device, unsigned int sensorType, unsigned int* temp);
+typedef int (*NvmlDeviceGetFanSpeedFn)(void* device, unsigned int* speed);
+
+typedef struct {
+    unsigned int gpu;
+    unsigned int memory;
+} NvmlUtilization;
+
+typedef int (*NvmlDeviceGetUtilizationRatesFn)(void* device, NvmlUtilization* utilization);
+
+typedef struct {
+    ULONGLONG luidValue;
+    ULONG64 inOctets;
+    ULONG64 outOctets;
+    ULONG64 totalBytes;
+    DWORD tick;
+    BOOL valid;
+} NetworkHistory;
+
+static PDH_HQUERY g_cpuQuery = NULL;
+static PDH_HCOUNTER g_cpuTotal = NULL;
+static NetworkHistory g_netHistory[SUBSCREEN_MAX_NETWORKS * 2];
+static HMODULE g_nvml = NULL;
+static BOOL g_nvmlAttempted = FALSE;
+static BOOL g_nvmlReady = FALSE;
+static NvmlInitFn pNvmlInit = NULL;
+static NvmlShutdownFn pNvmlShutdown = NULL;
+static NvmlDeviceGetHandleByIndexFn pNvmlDeviceGetHandleByIndex = NULL;
+static NvmlDeviceGetTemperatureFn pNvmlDeviceGetTemperature = NULL;
+static NvmlDeviceGetFanSpeedFn pNvmlDeviceGetFanSpeed = NULL;
+static NvmlDeviceGetUtilizationRatesFn pNvmlDeviceGetUtilizationRates = NULL;
+
+static void CopyString(char* target, size_t targetSize, const char* value)
+{
+    if (!target || targetSize == 0) {
+        return;
+    }
+    if (!value || value[0] == '\0') {
+        target[0] = '\0';
+        return;
+    }
+    strncpy_s(target, targetSize, value, _TRUNCATE);
+}
+
+static void WideToAnsi(const WCHAR* value, char* target, size_t targetSize)
+{
+    if (!target || targetSize == 0) {
+        return;
+    }
+    target[0] = '\0';
+    if (!value || value[0] == L'\0') {
+        return;
+    }
+    WideCharToMultiByte(CP_ACP, 0, value, -1, target, (int)targetSize, NULL, NULL);
+}
 
 BOOL InitializePerformanceCounters(void)
 {
     PDH_STATUS status;
 
-    // Initialize CPU counter
-    status = PdhOpenQuery(NULL, 0, &cpuQuery);
-    if (status != ERROR_SUCCESS)
-    {
-        printf("Failed to open CPU query: 0x%x\n", status);
+    status = PdhOpenQuery(NULL, 0, &g_cpuQuery);
+    if (status != ERROR_SUCCESS) {
+        printf("Failed to open CPU query: 0x%lx\n", status);
         return FALSE;
     }
 
-    status = PdhAddEnglishCounter(cpuQuery, L"\\Processor(_Total)\\% Processor Time", 0, &cpuTotal);
-    if (status != ERROR_SUCCESS)
-    {
-        printf("Failed to add CPU counter: 0x%x\n", status);
-        PdhCloseQuery(cpuQuery);
+    status = PdhAddEnglishCounterW(g_cpuQuery, L"\\Processor(_Total)\\% Processor Time", 0, &g_cpuTotal);
+    if (status != ERROR_SUCCESS) {
+        printf("Failed to add CPU counter: 0x%lx\n", status);
+        PdhCloseQuery(g_cpuQuery);
+        g_cpuQuery = NULL;
         return FALSE;
     }
 
-    status = PdhCollectQueryData(cpuQuery);
-    if (status != ERROR_SUCCESS)
-    {
-        printf("Failed to collect CPU query data: 0x%x\n", status);
-        PdhCloseQuery(cpuQuery);
-        return FALSE;
-    }
-
-    // Initialize network counter
-    status = PdhOpenQuery(NULL, 0, &networkQuery);
-    if (status != ERROR_SUCCESS)
-    {
-        printf("Failed to open network query: 0x%x\n", status);
-        return FALSE;
-    }
-
-    status = PdhAddEnglishCounter(networkQuery, L"\\Network Interface(*)\\Bytes Total/sec", 0, &networkTotal);
-    if (status != ERROR_SUCCESS)
-    {
-        printf("Failed to add network counter: 0x%x\n", status);
-        PdhCloseQuery(networkQuery);
-        return FALSE;
-    }
-
-    status = PdhCollectQueryData(networkQuery);
-    if (status != ERROR_SUCCESS)
-    {
-        printf("Failed to collect network query data: 0x%x\n", status);
-        PdhCloseQuery(networkQuery);
+    status = PdhCollectQueryData(g_cpuQuery);
+    if (status != ERROR_SUCCESS) {
+        printf("Failed to collect CPU query data: 0x%lx\n", status);
+        PdhCloseQuery(g_cpuQuery);
+        g_cpuQuery = NULL;
         return FALSE;
     }
 
@@ -88,17 +107,20 @@ BOOL InitializePerformanceCounters(void)
 
 void CleanupPerformanceCounters(void)
 {
-    if (cpuQuery)
-    {
-        PdhCloseQuery(cpuQuery);
-        cpuQuery = NULL;
+    if (g_cpuQuery) {
+        PdhCloseQuery(g_cpuQuery);
+        g_cpuQuery = NULL;
+        g_cpuTotal = NULL;
     }
-
-    if (networkQuery)
-    {
-        PdhCloseQuery(networkQuery);
-        networkQuery = NULL;
+    if (g_nvmlReady && pNvmlShutdown) {
+        pNvmlShutdown();
     }
+    if (g_nvml) {
+        FreeLibrary(g_nvml);
+        g_nvml = NULL;
+    }
+    g_nvmlReady = FALSE;
+    g_nvmlAttempted = FALSE;
 }
 
 BOOL GetCPUUsage(double* cpuUsage)
@@ -106,15 +128,17 @@ BOOL GetCPUUsage(double* cpuUsage)
     PDH_FMT_COUNTERVALUE counterValue;
     PDH_STATUS status;
 
-    status = PdhCollectQueryData(cpuQuery);
-    if (status != ERROR_SUCCESS)
-    {
+    if (!cpuUsage || !g_cpuQuery || !g_cpuTotal) {
         return FALSE;
     }
 
-    status = PdhGetFormattedCounterValue(cpuTotal, PDH_FMT_DOUBLE, NULL, &counterValue);
-    if (status != ERROR_SUCCESS)
-    {
+    status = PdhCollectQueryData(g_cpuQuery);
+    if (status != ERROR_SUCCESS) {
+        return FALSE;
+    }
+
+    status = PdhGetFormattedCounterValue(g_cpuTotal, PDH_FMT_DOUBLE, NULL, &counterValue);
+    if (status != ERROR_SUCCESS) {
         return FALSE;
     }
 
@@ -125,10 +149,15 @@ BOOL GetCPUUsage(double* cpuUsage)
 BOOL GetMemoryUsage(double* memoryUsage)
 {
     MEMORYSTATUSEX memInfo;
-    memInfo.dwLength = sizeof(MEMORYSTATUSEX);
 
-    if (!GlobalMemoryStatusEx(&memInfo))
-    {
+    if (!memoryUsage) {
+        return FALSE;
+    }
+
+    memset(&memInfo, 0, sizeof(memInfo));
+    memInfo.dwLength = sizeof(memInfo);
+
+    if (!GlobalMemoryStatusEx(&memInfo) || memInfo.ullTotalPhys == 0) {
         return FALSE;
     }
 
@@ -136,151 +165,525 @@ BOOL GetMemoryUsage(double* memoryUsage)
     return TRUE;
 }
 
-BOOL GetDiskUsage(double* diskUsage)
+static BOOL CollectDisks(SystemStats* stats)
 {
-    ULARGE_INTEGER freeBytesAvailable, totalNumberOfBytes, totalNumberOfFreeBytes;
+    WCHAR drives[512];
+    WCHAR* drive;
+    DWORD chars;
+    ULONGLONG totalBytes = 0;
+    ULONGLONG usedBytes = 0;
+    const ULONGLONG gb = 1024ULL * 1024ULL * 1024ULL;
 
-    if (!GetDiskFreeSpaceEx(L"C:\\", &freeBytesAvailable, &totalNumberOfBytes, &totalNumberOfFreeBytes))
-    {
+    chars = GetLogicalDriveStringsW(ARRAYSIZE(drives), drives);
+    if (chars == 0 || chars >= ARRAYSIZE(drives)) {
         return FALSE;
     }
 
-    *diskUsage = ((double)(totalNumberOfBytes.QuadPart - totalNumberOfFreeBytes.QuadPart) / (double)totalNumberOfBytes.QuadPart) * 100.0;
+    drive = drives;
+    while (*drive && stats->diskCount < SUBSCREEN_MAX_DISKS) {
+        ULARGE_INTEGER freeBytesAvailable;
+        ULARGE_INTEGER totalNumberOfBytes;
+        ULARGE_INTEGER totalNumberOfFreeBytes;
+
+        if (GetDriveTypeW(drive) == DRIVE_FIXED &&
+            GetDiskFreeSpaceExW(drive, &freeBytesAvailable, &totalNumberOfBytes, &totalNumberOfFreeBytes) &&
+            totalNumberOfBytes.QuadPart > 0) {
+            DiskStats* disk = &stats->disks[stats->diskCount++];
+            ULONGLONG diskUsed = totalNumberOfBytes.QuadPart - totalNumberOfFreeBytes.QuadPart;
+
+            WideToAnsi(drive, disk->name, sizeof(disk->name));
+            if (strlen(disk->name) > 2) {
+                disk->name[2] = '\0';
+            }
+            disk->usage = ((double)diskUsed / (double)totalNumberOfBytes.QuadPart) * 100.0;
+            disk->totalGB = (unsigned int)(totalNumberOfBytes.QuadPart / gb);
+            disk->usedGB = (unsigned int)(diskUsed / gb);
+            disk->temperature = 255;
+
+            totalBytes += totalNumberOfBytes.QuadPart;
+            usedBytes += diskUsed;
+        }
+
+        drive += wcslen(drive) + 1;
+    }
+
+    if (stats->diskCount == 0 || totalBytes == 0) {
+        return FALSE;
+    }
+
+    stats->diskUsage = ((double)usedBytes / (double)totalBytes) * 100.0;
+    stats->diskTotalGB = (unsigned int)(totalBytes / gb);
+    stats->diskUsedGB = (unsigned int)(usedBytes / gb);
+    return TRUE;
+}
+
+static BOOL GetDiskStats(double* diskUsage, unsigned int* totalGB, unsigned int* usedGB)
+{
+    SystemStats stats;
+    memset(&stats, 0, sizeof(stats));
+    if (!CollectDisks(&stats)) {
+        return FALSE;
+    }
+    if (diskUsage) {
+        *diskUsage = stats.diskUsage;
+    }
+    if (totalGB) {
+        *totalGB = stats.diskTotalGB;
+    }
+    if (usedGB) {
+        *usedGB = stats.diskUsedGB;
+    }
+    return TRUE;
+}
+
+BOOL GetDiskUsage(double* diskUsage)
+{
+    return GetDiskStats(diskUsage, NULL, NULL);
+}
+
+static int ScoreIPv4(const unsigned char candidate[4])
+{
+    if (candidate[0] == 0 ||
+        candidate[0] == 127 ||
+        (candidate[0] == 169 && candidate[1] == 254)) {
+        return 0;
+    }
+
+    if (candidate[0] == 192 && candidate[1] == 168) {
+        return 5;
+    }
+    if (candidate[0] == 10) {
+        return 5;
+    }
+    if (candidate[0] == 172 && candidate[1] >= 16 && candidate[1] <= 31) {
+        return 5;
+    }
+    if (candidate[0] == 100 && candidate[1] >= 64 && candidate[1] <= 127) {
+        return 1;
+    }
+
+    return 2;
+}
+
+static int ExtractBestIPv4(const IP_ADAPTER_ADDRESSES* adapter, unsigned char ip[4])
+{
+    int bestScore = 0;
+
+    memset(ip, 0, 4);
+
+    if (!adapter) {
+        return 0;
+    }
+
+    for (IP_ADAPTER_UNICAST_ADDRESS* unicast = adapter->FirstUnicastAddress; unicast; unicast = unicast->Next) {
+        SOCKADDR_IN* sa = (SOCKADDR_IN*)unicast->Address.lpSockaddr;
+        if (sa && sa->sin_family == AF_INET) {
+            unsigned char candidate[4];
+            int score;
+            memcpy(candidate, &sa->sin_addr.S_un.S_un_b, 4);
+            score = ScoreIPv4(candidate);
+            if (score > bestScore) {
+                memcpy(ip, candidate, 4);
+                bestScore = score;
+            }
+        }
+    }
+
+    return bestScore;
+}
+
+static IP_ADAPTER_ADDRESSES* LoadAdapterAddresses(void)
+{
+    ULONG bufferSize = 15000;
+    IP_ADAPTER_ADDRESSES* addresses = (IP_ADAPTER_ADDRESSES*)malloc(bufferSize);
+    DWORD result;
+
+    if (!addresses) {
+        return NULL;
+    }
+
+    result = GetAdaptersAddresses(AF_INET,
+                                  GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                                  NULL,
+                                  addresses,
+                                  &bufferSize);
+    if (result == ERROR_BUFFER_OVERFLOW) {
+        IP_ADAPTER_ADDRESSES* bigger = (IP_ADAPTER_ADDRESSES*)realloc(addresses, bufferSize);
+        if (!bigger) {
+            free(addresses);
+            return NULL;
+        }
+        addresses = bigger;
+        result = GetAdaptersAddresses(AF_INET,
+                                      GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                                      NULL,
+                                      addresses,
+                                      &bufferSize);
+    }
+
+    if (result != NO_ERROR) {
+        free(addresses);
+        return NULL;
+    }
+
+    return addresses;
+}
+
+static NetworkHistory* FindNetworkHistory(ULONGLONG luidValue)
+{
+    NetworkHistory* empty = NULL;
+
+    for (int i = 0; i < ARRAYSIZE(g_netHistory); ++i) {
+        if (g_netHistory[i].valid && g_netHistory[i].luidValue == luidValue) {
+            return &g_netHistory[i];
+        }
+        if (!g_netHistory[i].valid && !empty) {
+            empty = &g_netHistory[i];
+        }
+    }
+
+    if (empty) {
+        memset(empty, 0, sizeof(*empty));
+        empty->luidValue = luidValue;
+        empty->tick = GetTickCount();
+        empty->valid = TRUE;
+    }
+    return empty;
+}
+
+static const MIB_IF_ROW2* FindInterfaceRow(const MIB_IF_TABLE2* table, ULONGLONG luidValue)
+{
+    if (!table) {
+        return NULL;
+    }
+
+    for (ULONG i = 0; i < table->NumEntries; ++i) {
+        if (table->Table[i].InterfaceLuid.Value == luidValue) {
+            return &table->Table[i];
+        }
+    }
+
+    return NULL;
+}
+
+static BOOL IsUsableAdapter(const IP_ADAPTER_ADDRESSES* adapter)
+{
+    if (!adapter ||
+        adapter->OperStatus != IfOperStatusUp ||
+        adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK ||
+        adapter->IfType == IF_TYPE_TUNNEL) {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static void FillNetworkFromRow(NetworkStats* net,
+                               const IP_ADAPTER_ADDRESSES* adapter,
+                               const MIB_IF_ROW2* row,
+                               DWORD now)
+{
+    NetworkHistory* history;
+    ULONG64 inOctets = row->InOctets;
+    ULONG64 outOctets = row->OutOctets;
+    ULONG64 totalBytes = inOctets + outOctets;
+    DWORD elapsedMs;
+
+    memset(net, 0, sizeof(*net));
+    WideToAnsi(adapter->FriendlyName, net->name, sizeof(net->name));
+    if (net->name[0] == '\0') {
+        WideToAnsi(adapter->Description, net->name, sizeof(net->name));
+    }
+    if (net->name[0] == '\0') {
+        CopyString(net->name, sizeof(net->name), "LAN");
+    }
+    ExtractBestIPv4(adapter, net->ipv4);
+
+    history = FindNetworkHistory(row->InterfaceLuid.Value);
+    if (!history) {
+        net->totalMB = (unsigned int)(totalBytes / (1024ULL * 1024ULL));
+        return;
+    }
+
+    elapsedMs = now - history->tick;
+    if (history->tick != 0 &&
+        elapsedMs > 0 &&
+        inOctets >= history->inOctets &&
+        outOctets >= history->outOctets) {
+        ULONG64 deltaIn = inOctets - history->inOctets;
+        ULONG64 deltaOut = outOctets - history->outOctets;
+        net->downloadKBps = (unsigned int)((deltaIn * 1000ULL) / elapsedMs / 1024ULL);
+        net->uploadKBps = (unsigned int)((deltaOut * 1000ULL) / elapsedMs / 1024ULL);
+    }
+
+    history->inOctets = inOctets;
+    history->outOctets = outOctets;
+    history->totalBytes = totalBytes;
+    history->tick = now;
+    history->valid = TRUE;
+    net->totalMB = (unsigned int)(totalBytes / (1024ULL * 1024ULL));
+}
+
+static void FillFallbackNetwork(SystemStats* stats)
+{
+    NetworkStats* net = &stats->networks[0];
+
+    memset(net, 0, sizeof(*net));
+    CopyString(net->name, sizeof(net->name), "LAN");
+    stats->networkCount = 1;
+}
+
+static BOOL UpdateNetworkStats(SystemStats* stats)
+{
+    IP_ADAPTER_ADDRESSES* addresses = LoadAdapterAddresses();
+    MIB_IF_TABLE2* table = NULL;
+    DWORD now = GetTickCount();
+    const int priorities[] = { 5, 2, 1 };
+
+    if (!addresses) {
+        FillFallbackNetwork(stats);
+        return TRUE;
+    }
+
+    if (GetIfTable2(&table) != NO_ERROR || !table) {
+        free(addresses);
+        FillFallbackNetwork(stats);
+        return TRUE;
+    }
+
+    for (int priorityIndex = 0;
+         priorityIndex < ARRAYSIZE(priorities) && stats->networkCount < SUBSCREEN_MAX_NETWORKS;
+         ++priorityIndex) {
+        for (const IP_ADAPTER_ADDRESSES* adapter = addresses;
+             adapter && stats->networkCount < SUBSCREEN_MAX_NETWORKS;
+             adapter = adapter->Next) {
+            unsigned char ip[4];
+            const MIB_IF_ROW2* row;
+            NetworkStats* net;
+            int score;
+
+            if (!IsUsableAdapter(adapter)) {
+                continue;
+            }
+
+            score = ExtractBestIPv4(adapter, ip);
+            if (score != priorities[priorityIndex]) {
+                continue;
+            }
+
+            row = FindInterfaceRow(table, adapter->Luid.Value);
+            if (!row || row->OperStatus != IfOperStatusUp) {
+                continue;
+            }
+
+            net = &stats->networks[stats->networkCount++];
+            FillNetworkFromRow(net, adapter, row, now);
+            stats->netDownloadKBps += net->downloadKBps;
+            stats->netUploadKBps += net->uploadKBps;
+            stats->netTotalMB += net->totalMB;
+            if (stats->ipv4[0] == 0) {
+                memcpy(stats->ipv4, net->ipv4, sizeof(stats->ipv4));
+            }
+        }
+    }
+
+    if (table) {
+        FreeMibTable(table);
+    }
+    free(addresses);
+
+    if (stats->networkCount == 0) {
+        FillFallbackNetwork(stats);
+    }
+
+    stats->networkUsage = (double)(stats->netUploadKBps + stats->netDownloadKBps);
     return TRUE;
 }
 
 BOOL GetNetworkUsage(double* networkUsage)
 {
-    PDH_FMT_COUNTERVALUE counterValue;
-    PDH_STATUS status;
-
-    status = PdhCollectQueryData(networkQuery);
-    if (status != ERROR_SUCCESS)
-    {
+    SystemStats stats;
+    memset(&stats, 0, sizeof(stats));
+    if (!UpdateNetworkStats(&stats)) {
         return FALSE;
     }
-
-    status = PdhGetFormattedCounterValue(networkTotal, PDH_FMT_DOUBLE, NULL, &counterValue);
-    if (status != ERROR_SUCCESS)
-    {
-        return FALSE;
+    if (networkUsage) {
+        *networkUsage = stats.networkUsage;
     }
-
-    *networkUsage = counterValue.doubleValue;
     return TRUE;
+}
+
+static void TryLoadNvml(void)
+{
+    WCHAR systemPath[MAX_PATH];
+
+    if (g_nvmlAttempted) {
+        return;
+    }
+    g_nvmlAttempted = TRUE;
+
+    g_nvml = LoadLibraryW(L"nvml.dll");
+    if (!g_nvml && GetSystemDirectoryW(systemPath, ARRAYSIZE(systemPath))) {
+        wcscat_s(systemPath, ARRAYSIZE(systemPath), L"\\nvml.dll");
+        g_nvml = LoadLibraryW(systemPath);
+    }
+    if (!g_nvml) {
+        g_nvml = LoadLibraryW(L"C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll");
+    }
+    if (!g_nvml) {
+        return;
+    }
+
+    pNvmlInit = (NvmlInitFn)GetProcAddress(g_nvml, "nvmlInit_v2");
+    pNvmlShutdown = (NvmlShutdownFn)GetProcAddress(g_nvml, "nvmlShutdown");
+    pNvmlDeviceGetHandleByIndex = (NvmlDeviceGetHandleByIndexFn)GetProcAddress(g_nvml, "nvmlDeviceGetHandleByIndex_v2");
+    pNvmlDeviceGetTemperature = (NvmlDeviceGetTemperatureFn)GetProcAddress(g_nvml, "nvmlDeviceGetTemperature");
+    pNvmlDeviceGetFanSpeed = (NvmlDeviceGetFanSpeedFn)GetProcAddress(g_nvml, "nvmlDeviceGetFanSpeed");
+    pNvmlDeviceGetUtilizationRates = (NvmlDeviceGetUtilizationRatesFn)GetProcAddress(g_nvml, "nvmlDeviceGetUtilizationRates");
+
+    if (pNvmlInit &&
+        pNvmlDeviceGetHandleByIndex &&
+        pNvmlDeviceGetTemperature &&
+        pNvmlDeviceGetUtilizationRates &&
+        pNvmlInit() == 0) {
+        g_nvmlReady = TRUE;
+    }
 }
 
 BOOL GetGPUTemperature(double* temperature)
 {
-    // Initialize COM
-    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    if (FAILED(hr))
-    {
+    void* device = NULL;
+    unsigned int temp = 0;
+
+    if (!temperature) {
         return FALSE;
     }
 
-    // Initialize security
-    hr = CoInitializeSecurity(NULL, -1, NULL, NULL, RPC_C_AUTHN_LEVEL_DEFAULT,
-                             RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE, NULL);
-    if (FAILED(hr) && hr != RPC_E_TOO_LATE)
-    {
-        CoUninitialize();
-        return FALSE;
+    *temperature = 255.0;
+    TryLoadNvml();
+    if (!g_nvmlReady ||
+        pNvmlDeviceGetHandleByIndex(0, &device) != 0 ||
+        pNvmlDeviceGetTemperature(device, 0, &temp) != 0) {
+        return TRUE;
     }
 
-    IWbemLocator* pLocator = NULL;
-    hr = CoCreateInstance(CLSID_WbemLocator, NULL, CLSCTX_INPROC_SERVER,
-                         IID_IWbemLocator, (LPVOID*)&pLocator);
-    if (FAILED(hr))
-    {
-        CoUninitialize();
-        return FALSE;
+    *temperature = (double)temp;
+    return TRUE;
+}
+
+static void FillGpuStats(SystemStats* stats)
+{
+    void* device = NULL;
+    unsigned int temp = 0;
+    unsigned int fan = 0;
+    NvmlUtilization utilization;
+
+    stats->gpuTemperature = 255.0;
+    stats->gpuUsage = 0.0;
+    stats->gpuFanRpm = 255;
+
+    TryLoadNvml();
+    if (!g_nvmlReady || pNvmlDeviceGetHandleByIndex(0, &device) != 0) {
+        return;
     }
 
-    IWbemServices* pServices = NULL;
-    hr = pLocator->ConnectServer(_bstr_t(L"ROOT\\CIMV2"), NULL, NULL, NULL,
-                                WBEM_FLAG_CONNECT_USE_MAX_WAIT, NULL, NULL, &pServices);
-    pLocator->Release();
-    if (FAILED(hr))
-    {
-        CoUninitialize();
-        return FALSE;
+    stats->hasNvidiaGpu = TRUE;
+    if (pNvmlDeviceGetTemperature(device, 0, &temp) == 0) {
+        stats->gpuTemperature = (double)temp;
     }
-
-    // Set security levels
-    hr = CoSetProxyBlanket(pServices, RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, NULL,
-                          RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE, NULL, EOAC_NONE);
-    if (FAILED(hr))
-    {
-        pServices->Release();
-        CoUninitialize();
-        return FALSE;
+    memset(&utilization, 0, sizeof(utilization));
+    if (pNvmlDeviceGetUtilizationRates(device, &utilization) == 0) {
+        stats->gpuUsage = (double)utilization.gpu;
     }
+    if (pNvmlDeviceGetFanSpeed && pNvmlDeviceGetFanSpeed(device, &fan) == 0) {
+        stats->gpuFanRpm = fan;
+    }
+}
 
-    // Query for GPU temperature
-    IEnumWbemClassObject* pEnumerator = NULL;
-    hr = pServices->ExecQuery(_bstr_t(L"WQL"),
-                             _bstr_t(L"SELECT * FROM Win32_VideoController"),
-                             WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
-                             NULL, &pEnumerator);
+static void FillIdentity(SystemStats* stats)
+{
+    DWORD size = SUBSCREEN_NAME_LEN;
+    HKEY key;
 
-    if (SUCCEEDED(hr))
-    {
-        IWbemClassObject* pClassObject = NULL;
-        ULONG uReturn = 0;
+    CopyString(stats->hostName, sizeof(stats->hostName), "Windows");
+    GetComputerNameA(stats->hostName, &size);
 
-        while (pEnumerator->Next(WBEM_INFINITE, 1, &pClassObject, &uReturn) == S_OK)
-        {
-            VARIANT vtProp;
-            VariantInit(&vtProp);
+    CopyString(stats->cpuName, sizeof(stats->cpuName), "CPU");
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", 0, KEY_READ, &key) == ERROR_SUCCESS) {
+        DWORD type;
+        DWORD cb = SUBSCREEN_NAME_LEN;
+        char value[SUBSCREEN_NAME_LEN];
 
-            // Try to get temperature (this may not work on all systems)
-            hr = pClassObject->Get(L"CurrentTemperature", 0, &vtProp, NULL, NULL);
-            if (SUCCEEDED(hr) && vtProp.vt != VT_NULL)
-            {
-                *temperature = (double)vtProp.lVal / 10.0 - 273.15; // Convert from tenths of Kelvin to Celsius
-                VariantClear(&vtProp);
-                pClassObject->Release();
-                pEnumerator->Release();
-                pServices->Release();
-                CoUninitialize();
-                return TRUE;
-            }
-
-            VariantClear(&vtProp);
-            pClassObject->Release();
+        if (RegQueryValueExA(key, "ProcessorNameString", NULL, &type, (LPBYTE)value, &cb) == ERROR_SUCCESS && type == REG_SZ) {
+            CopyString(stats->cpuName, sizeof(stats->cpuName), value);
         }
 
-        pEnumerator->Release();
+        RegCloseKey(key);
     }
 
-    pServices->Release();
-    CoUninitialize();
+    CopyString(stats->osName, sizeof(stats->osName), "Windows");
+    {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        RtlGetVersionFn pRtlGetVersion = ntdll ? (RtlGetVersionFn)GetProcAddress(ntdll, "RtlGetVersion") : NULL;
+        RTL_OSVERSIONINFOW version;
+        if (pRtlGetVersion) {
+            memset(&version, 0, sizeof(version));
+            version.dwOSVersionInfoSize = sizeof(version);
+            if (pRtlGetVersion(&version) == 0) {
+                sprintf_s(stats->osName,
+                          sizeof(stats->osName),
+                          "Windows %lu.%lu.%lu",
+                          version.dwMajorVersion,
+                          version.dwMinorVersion,
+                          version.dwBuildNumber);
+            }
+        }
+    }
 
-    // Fallback: return a default temperature
-    *temperature = 45.0; // Default GPU temperature
-    return TRUE;
+    CopyString(stats->modelName, sizeof(stats->modelName), "Harbor PC");
+    CopyString(stats->serialNumber, sizeof(stats->serialNumber), "Unknown");
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\BIOS", 0, KEY_READ, &key) == ERROR_SUCCESS) {
+        DWORD type;
+        DWORD cb;
+        char value[SUBSCREEN_NAME_LEN];
+
+        cb = sizeof(value);
+        if (RegQueryValueExA(key, "SystemProductName", NULL, &type, (LPBYTE)value, &cb) == ERROR_SUCCESS && type == REG_SZ) {
+            CopyString(stats->modelName, sizeof(stats->modelName), value);
+        }
+
+        cb = sizeof(value);
+        if (RegQueryValueExA(key, "SystemSerialNumber", NULL, &type, (LPBYTE)value, &cb) == ERROR_SUCCESS && type == REG_SZ) {
+            CopyString(stats->serialNumber, sizeof(stats->serialNumber), value);
+        }
+
+        RegCloseKey(key);
+    }
 }
 
 BOOL GetSystemStats(SystemStats* stats)
 {
-    if (!GetCPUUsage(&stats->cpuUsage))
+    if (!stats) {
         return FALSE;
+    }
 
-    if (!GetMemoryUsage(&stats->memoryUsage))
+    memset(stats, 0, sizeof(*stats));
+    stats->cpuTemperature = 255.0;
+    FillIdentity(stats);
+
+    if (!GetCPUUsage(&stats->cpuUsage)) {
         return FALSE;
-
-    if (!GetDiskUsage(&stats->diskUsage))
+    }
+    if (!GetMemoryUsage(&stats->memoryUsage)) {
         return FALSE;
-
-    if (!GetNetworkUsage(&stats->networkUsage))
+    }
+    if (!CollectDisks(stats)) {
         return FALSE;
-
-    if (!GetGPUTemperature(&stats->temperature))
+    }
+    if (!UpdateNetworkStats(stats)) {
         return FALSE;
-
-    // GPU usage - simplified, would need NVAPI or similar for accurate measurement
-    stats->gpuUsage = 0.0; // Placeholder
-
+    }
+    FillGpuStats(stats);
     return TRUE;
 }

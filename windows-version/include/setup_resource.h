@@ -1,0 +1,6 @@
+#ifndef SETUP_RESOURCE_H
+#define SETUP_RESOURCE_H
+
+#define IDR_SUBSCREEN_EXE 101
+
+#endif

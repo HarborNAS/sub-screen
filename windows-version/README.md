@@ -1,144 +1,186 @@
-# HarborOS Subscreen - Windows Version
+# HarborOS Subscreen - Windows WinUSB Service
 
-A Windows service that monitors system statistics and displays them on a USB-connected screen device.
+This Windows version drives the HarborOS subscreen hardware as a user-mode WinUSB service. It does not register the device as a Windows display. The service sends the same packed USB protocol used by the Linux implementation to the USB device `VID_5448&PID_0002`.
 
-## Features
+## Current Scope
 
-- **System Monitoring**: CPU usage, memory usage, disk usage, network activity, GPU temperature
-- **USB Communication**: Communicates with HarborOS subscreen device via HID interface
-- **Windows Service**: Runs as a background Windows service
-- **Console Mode**: Can also run in console mode for testing
+- USB transport: WinUSB bulk pipes, expected `OUT 0x02` and `IN 0x81`
+- Device interface GUID: `{63730607-e5e5-48c9-b9de-e808f11c6a35}`
+- Runtime modes: Windows service, real console mode, mock USB console mode
+- Diagnostics: `probe`, `setup-check`, `selftest`
+- Service features: Time/Home, System, Disk, WLAN, Mode, Info pages, ACK/page read thread, reconnect handling
+- Manual firmware tools: `fw-version`, `fw-update <firmware.bin>`
+- Not implemented as Windows drivers: EC register writes, Windows virtual display / IddCx, custom kernel/UMDF sensor drivers
 
-## Prerequisites
+## Build
 
-- Windows 10/11
-- Visual Studio 2019/2022 with C++ development tools
-- Windows SDK
-- Administrator privileges (for service installation)
+Install Visual Studio Build Tools with the C++ workload and Windows SDK, then run:
 
-## Building
-
-1. Open the project folder in Visual Studio Code
-2. Make sure you have the "C/C++" extension installed
-3. Run the build task: `Ctrl+Shift+P` → "Tasks: Run Build Task"
-
-This will compile all source files into `subscreen.exe`.
-
-## Installation
-
-### As a Windows Service (Recommended)
-
-1. Open Command Prompt as Administrator
-2. Navigate to the build directory
-3. Install the service:
-   ```
-   subscreen.exe install
-   ```
-4. Start the service:
-   ```
-   net start HarborOSSubscreenService
-   ```
-
-### Console Mode (For Testing)
-
-Run the application in console mode to see system stats without installing as a service:
-
+```cmd
+build.bat Debug
+build.bat Release
 ```
+
+The output is written to:
+
+```text
+build\Debug\subscreen.exe
+build\Release\subscreen.exe
+build\Release\HarborSubscreenSetup.exe
+```
+
+## Customer One-Click Installer
+
+Release builds produce a single customer installer:
+
+```cmd
+build\Release\HarborSubscreenSetup.exe
+```
+
+Run it elevated or double-click it and accept UAC. The installer:
+
+1. Finds exactly one present `USB\VID_5448&PID_0002` device on the fixed internal USB port.
+2. Selects Microsoft's inbox `WinUsb Device` node from `C:\Windows\INF\winusb.inf`.
+3. Registers `DeviceInterfaceGUIDs={63730607-e5e5-48c9-b9de-e808f11c6a35}` on that device instance.
+4. Restarts the device instance, extracts `subscreen.exe` to `%ProgramFiles%\Harbor\Subscreen`, installs `HarborOSSubscreenService`, and starts it.
+5. Runs `subscreen.exe setup-check`.
+
+This path does not ship Harbor's unsigned INF and does not require disabling Secure Boot. It still requires administrator approval because Windows must change the selected function driver for the USB device.
+
+Uninstall the application while leaving the WinUSB binding intact:
+
+```cmd
+HarborSubscreenSetup.exe /uninstall
+```
+
+## Engineering INF
+
+Development binding can still use the INF in `driver\harboros-subscreen-winusb.inf`.
+
+This INF is for engineering validation only. It binds `USB\VID_5448&PID_0002` to the Windows inbox `winusb.sys` driver and registers the HarborOS device interface GUID. It is not the customer install path while unsigned.
+
+On a development target, use one of these temporary approaches:
+
+- Boot once with driver signature enforcement disabled, then install the INF for that boot session.
+- Use a test-signed driver package on a machine configured for test signing. Secure Boot must be disabled for Windows test-signing mode.
+
+Do not ship unsigned INF, Zadig/libwdi-generated bindings, or test-signing instructions as the customer installer.
+
+For test-signing mode on the target Windows 11 machine, elevated Command Prompt:
+
+```cmd
+bcdedit /set testsigning on
+shutdown -r -t 0
+```
+
+After reboot:
+
+```cmd
+pnputil /add-driver driver\harboros-subscreen-winusb.inf /install
+```
+
+Confirm enumeration:
+
+```powershell
+Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match 'VID_5448|PID_0002' } | Select Status,Class,FriendlyName,InstanceId
+```
+
+For a customer no-INF path, update device firmware to expose Microsoft OS descriptors that report compatible ID `WINUSB` and set the same `DeviceInterfaceGUIDs` value. Windows 8 and later can then bind WinUSB automatically by using the inbox WinUSB INF.
+
+If firmware cannot expose WinUSB descriptors, the customer-ready alternatives are a properly signed driver package or a protocol redesign on a Windows inbox USB class such as HID.
+
+## Diagnostics
+
+Run protocol-only tests without hardware:
+
+```cmd
+subscreen.exe selftest
+```
+
+Run one mock cycle and print packets:
+
+```cmd
+subscreen.exe console --mock-usb --once
+```
+
+Probe the real WinUSB device:
+
+```cmd
+subscreen.exe probe
+```
+
+Check customer setup state:
+
+```cmd
+subscreen.exe setup-check
+```
+
+Expected failure modes:
+
+- `Target USB device is not present in PnP`: the hardware is not connected or did not enumerate.
+- `No WinUSB interface registered`: the hardware is connected, but no WinUSB binding is installed.
+- `Endpoint mismatch`: WinUSB is bound, but the USB interface does not expose usable bulk IN/OUT pipes.
+
+Run one real hardware cycle:
+
+```cmd
+subscreen.exe console --once
+```
+
+Run continuous console mode:
+
+```cmd
 subscreen.exe console
 ```
 
-## Usage
+Manual firmware commands:
 
-Once installed and running, the service will:
-
-1. Monitor system statistics every second
-2. Send formatted data to the connected USB screen device
-3. Display CPU, memory, disk, network, and temperature information
-
-## Protocol Compatibility
-
-This Windows version now uses the same USB protocol as the Linux version, ensuring full compatibility with the HarborOS subscreen hardware. The implementation includes:
-
-- **Protocol Structures**: Compatible Request/Ack structures with proper packing
-- **Command Definitions**: GET, SET, AUTOSET, UPDATE commands
-- **AIM Targets**: All system monitoring targets (CPU, Memory, Disk, Network, etc.)
-- **CRC Validation**: Data integrity checking
-- **USB Communication**: HID API with proper report formatting
-
-### Data Format
-
-The service now sends structured binary data packets instead of simple text:
-
-```
-Header: 0x5aa5 (signature)
-Sequence: incremental counter
-Length: packet length
-Command: SET (0x02)
-AIM: target system (System_AIM, Disk_AIM, etc.)
-Data: system monitoring values
-CRC: checksum
+```cmd
+subscreen.exe fw-version
+subscreen.exe fw-update firmware.bin
 ```
 
-This ensures the Windows version works seamlessly with the same USB screen device as the Linux version.
+Stop the service before `fw-update` if it already owns the USB device.
 
-## Troubleshooting
+## Service Install
 
-### Device Not Found
-- Ensure the USB screen device is properly connected
-- Check Device Manager for HID devices
-- Run in console mode to verify device detection
+Elevated Command Prompt:
 
-### Service Won't Start
-- Check Windows Event Viewer for error messages
-- Ensure you have administrator privileges
-- Try running in console mode first
-
-### Build Errors
-- Ensure Visual Studio and Windows SDK are properly installed
-- Check that all required libraries are available
-- Verify include paths in c_cpp_properties.json
-
-## Uninstallation
-
-To uninstall the service:
-
-1. Stop the service:
-   ```
-   net stop HarborOSSubscreenService
-   ```
-2. Uninstall the service:
-   ```
-   subscreen.exe uninstall
-   ```
-
-## Development
-
-### Project Structure
+```cmd
+subscreen.exe install
+net start HarborOSSubscreenService
 ```
+
+Uninstall:
+
+```cmd
+net stop HarborOSSubscreenService
+subscreen.exe uninstall
+```
+
+The service keeps running when the USB device is absent and retries connection every two seconds. If the device is unplugged after a failed write, the service closes the WinUSB handle and reconnects when the device returns.
+
+## Project Structure
+
+```text
 windows-version/
-├── src/
-│   ├── main.c              # Main entry point and service logic
-│   ├── system_monitor.c    # System statistics monitoring
-│   ├── usb_comm.c          # USB/HID communication
-│   └── service.c           # Windows service functions
+├── build.bat
+├── driver/
+│   └── harboros-subscreen-winusb.inf
 ├── include/
+│   ├── protocol.h
+│   ├── setup_resource.h
+│   ├── service.h
 │   ├── system_monitor.h
-│   ├── usb_comm.h
-│   └── service.h
-├── .vscode/
-│   ├── tasks.json          # Build tasks
-│   ├── launch.json         # Debug configurations
-│   └── c_cpp_properties.json # IntelliSense settings
-└── README.md
+│   └── usb_comm.h
+└── src/
+    ├── firmware.c
+    ├── main.c
+    ├── protocol.c
+    ├── service.c
+    ├── setup.c
+    ├── setup.manifest
+    ├── setup_resources.rc
+    ├── system_monitor.c
+    └── usb_comm.c
 ```
-
-### Adding New Features
-
-1. Add new monitoring functions in `system_monitor.c`
-2. Update the `SystemStats` structure if needed
-3. Modify the data formatting in the service worker thread
-4. Update USB communication protocol as required
-
-## License
-
-This project is part of the HarborOS ecosystem.
