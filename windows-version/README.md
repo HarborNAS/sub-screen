@@ -29,6 +29,20 @@ build\Release\subscreen.exe
 build\Release\HarborSubscreenSetup.exe
 ```
 
+## Signing
+
+Customer releases should sign both executables with Microsoft Artifact Signing:
+
+```cmd
+sign-release.bat
+```
+
+The signing script builds Release, signs `build\Release\subscreen.exe`, rebuilds only the installer so it embeds that signed binary, signs `build\Release\HarborSubscreenSetup.exe`, verifies both signatures, then writes release assets and SHA256 hashes to `dist\`.
+
+Copy `signing\metadata.sample.json` to `signing\metadata.json` and fill it with Harbor's Artifact Signing endpoint, code signing account name, and certificate profile name. Do not commit the real `metadata.json`.
+
+See [SIGNING.md](SIGNING.md) for Azure setup, local dependency checks, manual SignTool commands, and the release checklist.
+
 ## Customer One-Click Installer
 
 Release builds produce a single customer installer:

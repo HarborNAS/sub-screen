@@ -3,10 +3,22 @@ setlocal enabledelayedexpansion
 
 set CONFIG=%~1
 if "%CONFIG%"=="" set CONFIG=Debug
+set BUILD_MODE=%~2
+if "%BUILD_MODE%"=="" set BUILD_MODE=all
 set "PF86=%ProgramFiles(x86)%"
 
 if /I not "%CONFIG%"=="Debug" if /I not "%CONFIG%"=="Release" (
-    echo Usage: build.bat [Debug^|Release]
+    echo Usage: build.bat [Debug^|Release] [setup-only]
+    exit /b 2
+)
+
+if /I not "%BUILD_MODE%"=="all" if /I not "%BUILD_MODE%"=="setup-only" (
+    echo Usage: build.bat [Debug^|Release] [setup-only]
+    exit /b 2
+)
+
+if /I "%BUILD_MODE%"=="setup-only" if /I not "%CONFIG%"=="Release" (
+    echo setup-only is only valid for Release builds.
     exit /b 2
 )
 
@@ -44,11 +56,19 @@ if /I "%CONFIG%"=="Debug" (
 set SOURCES=src\main.c src\system_monitor.c src\usb_comm.c src\protocol.c src\service.c src\firmware.c
 set LIBS=winusb.lib setupapi.lib cfgmgr32.lib pdh.lib psapi.lib iphlpapi.lib ws2_32.lib advapi32.lib powrprof.lib
 
-cl.exe %CFLAGS% %SOURCES% /Fo"%OUTDIR%\\" /Fe"%OUTDIR%\subscreen.exe" /link %LIBS%
-set RESULT=%ERRORLEVEL%
-if not "%RESULT%"=="0" (
-    popd
-    exit /b %RESULT%
+if /I not "%BUILD_MODE%"=="setup-only" (
+    cl.exe %CFLAGS% %SOURCES% /Fo"%OUTDIR%\\" /Fe"%OUTDIR%\subscreen.exe" /link %LIBS%
+    set RESULT=%ERRORLEVEL%
+    if not "!RESULT!"=="0" (
+        popd
+        exit /b !RESULT!
+    )
+) else (
+    if not exist "%OUTDIR%\subscreen.exe" (
+        echo %OUTDIR%\subscreen.exe was not found. Run build.bat Release before setup-only.
+        popd
+        exit /b 1
+    )
 )
 
 if /I "%CONFIG%"=="Release" (

@@ -1,17 +1,24 @@
 # Harbor Subscreen Windows Community Test Build
 
-This is the Windows community test build for the Harbor subscreen module.
+Because some Harbor users install Windows, we built this Windows community test build for the Harbor subscreen module.
 
 It installs a user-mode WinUSB service that talks to the built-in subscreen hardware. It does not add a Windows display monitor and it does not require disabling Secure Boot.
 
 ## Download
 
-Use the latest GitHub Release asset:
+Use the latest GitHub Release asset. Signed builds are published as:
 
 - `HarborSubscreenSetup.exe` - one-click installer
 - `HarborSubscreen-Windows-OneClick.zip` - the same installer in a zip archive
 
-SHA256 for the 2026-06-18 build:
+For each release, check the release notes for:
+
+- Publisher shown by Windows
+- SHA256 for `HarborSubscreenSetup.exe`
+- SHA256 for `HarborSubscreen-Windows-OneClick.zip`
+- SmartScreen status observed on first-run test machines
+
+SHA256 for the 2026-06-18 unsigned preview build:
 
 ```text
 HarborSubscreenSetup.exe
@@ -33,7 +40,7 @@ BCEBC45285E3A0A51C08B7928E807899C62CD66AD668568A13CC1FFF365DF102
 1. Download `HarborSubscreenSetup.exe` from the GitHub Release.
 2. Double-click it.
 3. Accept the Windows UAC prompt.
-4. If Windows SmartScreen says the app is from an unknown publisher, choose `More info`, then `Run anyway`.
+4. For signed builds, confirm the publisher name shown by Windows. Early signed builds may still show a SmartScreen unknown-app warning while reputation builds; choose `More info`, then `Run anyway` if you trust the Harbor release asset and its SHA256 matches.
 5. Wait for the installer to finish. It installs and starts `HarborOSSubscreenService`.
 
 The installer uses Microsoft's built-in `winusb.inf` and `winusb.sys`. It does not ship an unsigned Harbor driver package.
@@ -50,7 +57,7 @@ The installer uses Microsoft's built-in `winusb.inf` and `winusb.sys`. It does n
 
 ## Known Limitations
 
-- The installer is not code-signed yet, so SmartScreen may warn about an unknown publisher.
+- Signed community builds can still trigger SmartScreen reputation warnings at first. Signing shows the publisher; reputation improves over time through clean downloads and installs.
 - This is a subscreen status display, not a Windows extended monitor.
 - The first public build uses WinUSB binding on the current fixed USB device instance. Moving the hardware to another USB port is not the supported path.
 - Some hardware-only Linux features, such as EC register writes, are mapped to Windows user-mode best effort behavior.
@@ -110,3 +117,5 @@ When reporting issues in Discord or GitHub, please include:
 - Output from `subscreen.exe setup-check`
 - A photo of the subscreen page that looks wrong
 - Whether NVIDIA GPU is present
+
+We open-sourced the Windows code as well, and we welcome everyone to help improve it.

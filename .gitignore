@@ -3,3 +3,5 @@ protocol
 /.idea
 .DS_Store
 .github/copilot-instructions.md
+windows-version/dist/
+windows-version/signing/metadata.json
