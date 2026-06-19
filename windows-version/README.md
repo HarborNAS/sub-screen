@@ -47,6 +47,8 @@ Run it elevated or double-click it and accept UAC. The installer:
 
 This path does not ship Harbor's unsigned INF and does not require disabling Secure Boot. It still requires administrator approval because Windows must change the selected function driver for the USB device.
 
+For community-facing install instructions, known limitations, and troubleshooting steps, see [COMMUNITY_INSTALL.md](COMMUNITY_INSTALL.md).
+
 Uninstall the application while leaving the WinUSB binding intact:
 
 ```cmd
