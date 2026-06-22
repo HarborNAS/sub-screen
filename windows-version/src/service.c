@@ -28,6 +28,7 @@ typedef struct SubscreenRuntime {
     BOOL ioLockReady;
     volatile LONG currentPage;
     volatile LONG deviceFault;
+    DWORD lastTelemetryPageRefresh;
 } SubscreenRuntime;
 
 static SERVICE_STATUS g_serviceStatus;
@@ -57,7 +58,24 @@ static unsigned char ClampTemperature(double value)
 
 static unsigned char ClampByte(unsigned int value)
 {
+    if (value == 255U) {
+        return 255U;
+    }
     return (value > 254U) ? 254U : (unsigned char)value;
+}
+
+static unsigned char EncodeFanValue(unsigned int value)
+{
+    if (value == 255U) {
+        return (unsigned char)0xFF;
+    }
+    if (value > 1000U) {
+        value = (value + 21U) / 42U;
+    }
+    if (value > 254U) {
+        return (unsigned char)0xFE;
+    }
+    return (unsigned char)value;
 }
 
 static unsigned short ClampU16(unsigned int value)
@@ -308,7 +326,7 @@ static void PrintPacketTrace(const char* label, const Request* request, int pack
 static void PrintMenuMatrix(void)
 {
     printf("MENU primary aim=0x00 HomePage secondary=0x01 Time\n");
-    printf("MENU primary aim=0x10 SystemPage secondary=0x11 System ids=0:CPU,1:iGPU,2:Memory,3:DGPU\n");
+    printf("MENU primary aim=0x10 SystemPage secondary=0x11 System ids=0:CPU,2:Memory,3:DGPU when present\n");
     printf("MENU primary aim=0x50 DiskPage secondary=0x51 Disk per-disk\n");
     printf("MENU primary aim=0x60 WlanPage secondary=0x61 User,0x62 WlanSpeed,0x64 WlanTotal,0x65 WlanIP\n");
     printf("MENU primary aim=0x70 ModePage secondary=0x71 Mute,0x72 Properties,0x73 Balance\n");
@@ -590,53 +608,67 @@ static void FillSystemPageItem(SystemPage* item,
     item->sys_id = id;
     item->usage = ClampPercent(usage);
     item->temp = ClampTemperature(temperature);
-    item->rpm = ClampByte(rpm);
+    item->rpm = EncodeFanValue(rpm);
     CopyAscii(item->name, sizeof(item->name), name);
 }
 
-static int BuildSystemPage(Request* request, const SystemStats* stats, unsigned int order)
+static unsigned int SystemItemCount(const SystemStats* stats)
 {
+    return stats->hasNvidiaGpu ? 3U : 2U;
+}
+
+static unsigned int SystemPageCount(const SystemStats* stats)
+{
+    return (SystemItemCount(stats) + 1U) / 2U;
+}
+
+static void FillSystemItemByIndex(SystemPage* item, const SystemStats* stats, unsigned int index)
+{
+    if (index == 0U) {
+        FillSystemPageItem(item,
+                           0,
+                           stats->cpuUsage,
+                           stats->cpuTemperature,
+                           stats->cpuFanRpm,
+                           "CPU");
+    } else if (stats->hasNvidiaGpu && index == 1U) {
+        FillSystemPageItem(item,
+                           3,
+                           stats->gpuUsage,
+                           stats->gpuTemperature,
+                           stats->gpuFanRpm,
+                           "DGPU");
+    } else {
+        FillSystemPageItem(item,
+                           2,
+                           stats->memoryUsage,
+                           255.0,
+                           255,
+                           "Memory");
+    }
+}
+
+static int BuildSystemPage(Request* request, const SystemStats* stats, unsigned int order, unsigned int total)
+{
+    unsigned int first = (order - 1U) * 2U;
+    unsigned int count = 0;
+    unsigned int itemCount = SystemItemCount(stats);
+
     memset(request, 0, sizeof(*request));
     request->header = SIGNATURE;
     request->sequence = 0;
     request->cmd = SET;
     request->aim = SystemPage_AIM;
     request->SystemPage_data.order = (unsigned char)order;
-    request->SystemPage_data.total = 2;
-    request->SystemPage_data.syscount = stats->hasNvidiaGpu ? 4 : 3;
+    request->SystemPage_data.total = (unsigned char)total;
+    request->SystemPage_data.syscount = (unsigned char)itemCount;
 
-    if (order == 1) {
-        request->SystemPage_data.count = 2;
-        FillSystemPageItem(&request->SystemPage_data.systemPage[0],
-                           0,
-                           stats->cpuUsage,
-                           stats->cpuTemperature,
-                           255,
-                           "CPU");
-        FillSystemPageItem(&request->SystemPage_data.systemPage[1],
-                           1,
-                           0.0,
-                           255.0,
-                           255,
-                           "iGPU");
-    } else {
-        request->SystemPage_data.count = stats->hasNvidiaGpu ? 2 : 1;
-        FillSystemPageItem(&request->SystemPage_data.systemPage[0],
-                           2,
-                           stats->memoryUsage,
-                           255.0,
-                           255,
-                           "Memory");
-        if (stats->hasNvidiaGpu) {
-            FillSystemPageItem(&request->SystemPage_data.systemPage[1],
-                               3,
-                               stats->gpuUsage,
-                               stats->gpuTemperature,
-                               stats->gpuFanRpm,
-                               "DGPU");
-        }
+    for (unsigned int i = 0; i < 2U && first + i < itemCount; ++i) {
+        FillSystemItemByIndex(&request->SystemPage_data.systemPage[i], stats, first + i);
+        ++count;
     }
 
+    request->SystemPage_data.count = (unsigned char)count;
     return FinalizeManualRequest(request, (int)(offsetof(Request, SystemPage_data.crc) + 1));
 }
 
@@ -734,6 +766,7 @@ static BOOL SendStartupPackets(SubscreenRuntime* runtime, const SystemStats* sta
     Request request;
     int packetSize;
     BOOL ok = TRUE;
+    unsigned int systemPages = SystemPageCount(stats);
     unsigned int diskPages = (stats->diskCount + 1U) / 2U;
     unsigned int netPages = stats->networkCount ? stats->networkCount : 1U;
 
@@ -743,11 +776,10 @@ static BOOL SendStartupPackets(SubscreenRuntime* runtime, const SystemStats* sta
     packetSize = init_hidreport(&request, SET, TIME_AIM, 255);
     ok = SendRequest(runtime, "init time", &request, packetSize) && ok;
 
-    packetSize = BuildSystemPage(&request, stats, 1);
-    ok = SendRequest(runtime, "init system page 1", &request, packetSize) && ok;
-
-    packetSize = BuildSystemPage(&request, stats, 2);
-    ok = SendRequest(runtime, "init system page 2", &request, packetSize) && ok;
+    for (unsigned int page = 1; page <= systemPages; ++page) {
+        packetSize = BuildSystemPage(&request, stats, page, systemPages);
+        ok = SendRequest(runtime, "init system page", &request, packetSize) && ok;
+    }
 
     for (unsigned int page = 1; page <= diskPages; ++page) {
         packetSize = BuildDiskPage(&request, stats, page, diskPages);
@@ -771,6 +803,36 @@ static BOOL SendStartupPackets(SubscreenRuntime* runtime, const SystemStats* sta
     return ok;
 }
 
+static BOOL SendTelemetryPagePackets(SubscreenRuntime* runtime, const SystemStats* stats)
+{
+    Request request;
+    int packetSize;
+    BOOL ok = TRUE;
+    unsigned int systemPages = SystemPageCount(stats);
+    unsigned int diskPages = (stats->diskCount + 1U) / 2U;
+    unsigned int netPages = stats->networkCount ? stats->networkCount : 1U;
+
+    packetSize = BuildHomePage(&request, 1, 1);
+    ok = SendRequest(runtime, "refresh home page", &request, packetSize) && ok;
+
+    for (unsigned int page = 1; page <= systemPages; ++page) {
+        packetSize = BuildSystemPage(&request, stats, page, systemPages);
+        ok = SendRequest(runtime, "refresh system page", &request, packetSize) && ok;
+    }
+
+    for (unsigned int page = 1; page <= diskPages; ++page) {
+        packetSize = BuildDiskPage(&request, stats, page, diskPages);
+        ok = SendRequest(runtime, "refresh disk page", &request, packetSize) && ok;
+    }
+
+    for (unsigned int page = 1; page <= netPages; ++page) {
+        packetSize = BuildWlanPage(&request, stats, page, netPages);
+        ok = SendRequest(runtime, "refresh wlan page", &request, packetSize) && ok;
+    }
+
+    return ok;
+}
+
 static BOOL SendSystemPacket(SubscreenRuntime* runtime,
                              unsigned char id,
                              double usage,
@@ -784,7 +846,7 @@ static BOOL SendSystemPacket(SubscreenRuntime* runtime,
     request.system_data.system_info.sys_id = id;
     request.system_data.system_info.usage = ClampPercent(usage);
     request.system_data.system_info.temerature = ClampTemperature(temperature);
-    request.system_data.system_info.rpm = ClampByte(rpm);
+    request.system_data.system_info.rpm = EncodeFanValue(rpm);
     return SendRequest(runtime, label, &request, packetSize);
 }
 
@@ -797,8 +859,7 @@ static BOOL SendStatsPackets(SubscreenRuntime* runtime, const SystemStats* stats
     unsigned short valueB;
     BOOL ok = TRUE;
 
-    ok = SendSystemPacket(runtime, 0, stats->cpuUsage, stats->cpuTemperature, 255, "cpu") && ok;
-    ok = SendSystemPacket(runtime, 1, 0.0, 255.0, 255, "igpu") && ok;
+    ok = SendSystemPacket(runtime, 0, stats->cpuUsage, stats->cpuTemperature, stats->cpuFanRpm, "cpu") && ok;
     ok = SendSystemPacket(runtime, 2, stats->memoryUsage, 255.0, 255, "memory") && ok;
     if (stats->hasNvidiaGpu) {
         ok = SendSystemPacket(runtime, 3, stats->gpuUsage, stats->gpuTemperature, stats->gpuFanRpm, "dgpu") && ok;
@@ -968,6 +1029,15 @@ static int RunSubscreenLoop(BOOL mockUsb, BOOL once, HANDLE stopEvent)
                     printf("Failed to send startup packets.\n");
                     if (once) {
                         exitCode = 1;
+                    }
+                } else if (runtime.startupSent) {
+                    DWORD now = GetTickCount();
+                    if (runtime.lastTelemetryPageRefresh == 0 ||
+                        (now - runtime.lastTelemetryPageRefresh) >= 5000U) {
+                        if (!SendTelemetryPagePackets(&runtime, &stats)) {
+                            printf("Failed to refresh telemetry pages.\n");
+                        }
+                        runtime.lastTelemetryPageRefresh = now;
                     }
                 }
 

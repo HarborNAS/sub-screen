@@ -32,6 +32,7 @@ typedef struct {
 typedef struct {
     double cpuUsage;
     double cpuTemperature;
+    unsigned int cpuFanRpm;
     double memoryUsage;
     double diskUsage;
     double networkUsage;
@@ -49,6 +50,7 @@ typedef struct {
     unsigned int networkCount;
     NetworkStats networks[SUBSCREEN_MAX_NETWORKS];
     BOOL hasNvidiaGpu;
+    BOOL hasIgpuMetrics;
     char hostName[SUBSCREEN_NAME_LEN];
     char cpuName[SUBSCREEN_NAME_LEN];
     char osName[SUBSCREEN_NAME_LEN];

@@ -6,6 +6,7 @@
 #include <pdh.h>
 #include <pdhmsg.h>
 #include <psapi.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +53,11 @@ static double g_lastCpuUsage = -1.0;
 static DWORD g_lastCpuTick = 0;
 static double g_lastCpuTemperature = 255.0;
 static DWORD g_lastCpuTemperatureTick = 0;
+static unsigned int g_cachedDiskTemps[SUBSCREEN_MAX_DISKS];
+static unsigned int g_cachedDiskTempCount = 0;
+static DWORD g_lastDiskTempTick = 0;
+static unsigned int g_cachedSystemFan = 255;
+static DWORD g_lastSystemFanTick = 0;
 static NetworkHistory g_netHistory[SUBSCREEN_MAX_NETWORKS * 2];
 static HMODULE g_nvml = NULL;
 static BOOL g_nvmlAttempted = FALSE;
@@ -85,6 +91,122 @@ static void WideToAnsi(const WCHAR* value, char* target, size_t targetSize)
         return;
     }
     WideCharToMultiByte(CP_ACP, 0, value, -1, target, (int)targetSize, NULL, NULL);
+}
+
+static void TrimAscii(char* value)
+{
+    char* start = value;
+    char* end;
+
+    if (!value) {
+        return;
+    }
+
+    while (*start && isspace((unsigned char)*start)) {
+        ++start;
+    }
+    if (start != value) {
+        memmove(value, start, strlen(start) + 1);
+    }
+
+    end = value + strlen(value);
+    while (end > value && isspace((unsigned char)end[-1])) {
+        *--end = '\0';
+    }
+}
+
+static BOOL ParseUnsigned(const char* value, unsigned int* parsed)
+{
+    char* end = NULL;
+    unsigned long result;
+
+    if (!value || !parsed) {
+        return FALSE;
+    }
+
+    while (*value && !isdigit((unsigned char)*value)) {
+        if (*value == '-' || *value == 'N' || *value == 'n') {
+            return FALSE;
+        }
+        ++value;
+    }
+    if (!*value) {
+        return FALSE;
+    }
+
+    result = strtoul(value, &end, 10);
+    if (end == value || result > 65535UL) {
+        return FALSE;
+    }
+
+    *parsed = (unsigned int)result;
+    return TRUE;
+}
+
+static BOOL ReadFirstCommandLine(const char* command, char* line, size_t lineSize)
+{
+    FILE* pipe;
+
+    if (!command || !line || lineSize == 0) {
+        return FALSE;
+    }
+
+    line[0] = '\0';
+    pipe = _popen(command, "r");
+    if (!pipe) {
+        return FALSE;
+    }
+
+    while (fgets(line, (int)lineSize, pipe)) {
+        TrimAscii(line);
+        if (line[0] != '\0') {
+            _pclose(pipe);
+            return TRUE;
+        }
+    }
+
+    _pclose(pipe);
+    line[0] = '\0';
+    return FALSE;
+}
+
+static unsigned int ReadUnsignedCommandLines(const char* command,
+                                             unsigned int* values,
+                                             unsigned int maxValues,
+                                             unsigned int minValue,
+                                             unsigned int maxValue)
+{
+    FILE* pipe;
+    char line[128];
+    unsigned int count = 0;
+
+    if (!command || !values || maxValues == 0) {
+        return 0;
+    }
+
+    pipe = _popen(command, "r");
+    if (!pipe) {
+        return 0;
+    }
+
+    while (count < maxValues && fgets(line, sizeof(line), pipe)) {
+        unsigned int value;
+        TrimAscii(line);
+        if (ParseUnsigned(line, &value) && value >= minValue && value <= maxValue) {
+            values[count++] = value;
+        }
+    }
+
+    _pclose(pipe);
+    return count;
+}
+
+static unsigned char SensorTemperatureByte(unsigned int value)
+{
+    if (value == 0 || value > 254U) {
+        return 255;
+    }
+    return (unsigned char)value;
 }
 
 static ULONGLONG FileTimeToUInt64(const FILETIME* value)
@@ -278,6 +400,10 @@ void CleanupPerformanceCounters(void)
     g_lastCpuUsage = -1.0;
     g_lastCpuTemperature = 255.0;
     g_lastCpuTemperatureTick = 0;
+    g_cachedDiskTempCount = 0;
+    g_lastDiskTempTick = 0;
+    g_cachedSystemFan = 255;
+    g_lastSystemFanTick = 0;
     if (g_nvmlReady && pNvmlShutdown) {
         pNvmlShutdown();
     }
@@ -405,6 +531,69 @@ BOOL GetMemoryUsage(double* memoryUsage)
 
     *memoryUsage = ((double)(memInfo.ullTotalPhys - memInfo.ullAvailPhys) / (double)memInfo.ullTotalPhys) * 100.0;
     return TRUE;
+}
+
+static void RefreshDiskTemperatureCache(void)
+{
+    DWORD now = GetTickCount();
+    const char* command =
+        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+        "\"try { Get-PhysicalDisk | Get-StorageReliabilityCounter | "
+        "ForEach-Object { if ($_.Temperature -gt 0) { [int]$_.Temperature } } } catch {}\" 2>nul";
+
+    if (g_lastDiskTempTick != 0 && (now - g_lastDiskTempTick) < 60000U) {
+        return;
+    }
+
+    g_lastDiskTempTick = now;
+    memset(g_cachedDiskTemps, 0, sizeof(g_cachedDiskTemps));
+    g_cachedDiskTempCount = ReadUnsignedCommandLines(command,
+                                                     g_cachedDiskTemps,
+                                                     ARRAYSIZE(g_cachedDiskTemps),
+                                                     1,
+                                                     120);
+}
+
+static void ApplyDiskTemperatures(SystemStats* stats)
+{
+    if (!stats) {
+        return;
+    }
+
+    RefreshDiskTemperatureCache();
+    if (g_cachedDiskTempCount == 0) {
+        return;
+    }
+
+    for (unsigned int i = 0; i < stats->diskCount; ++i) {
+        unsigned int source = (i < g_cachedDiskTempCount) ? i : 0;
+        stats->disks[i].temperature = SensorTemperatureByte(g_cachedDiskTemps[source]);
+    }
+}
+
+static unsigned int GetSystemFanBestEffort(void)
+{
+    DWORD now = GetTickCount();
+    const char* command =
+        "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+        "\"try { Get-CimInstance Win32_Fan | ForEach-Object { "
+        "if ($_.CurrentReading -gt 0) { [int]$_.CurrentReading } "
+        "elseif ($_.DesiredSpeed -gt 0) { [int]$_.DesiredSpeed } } } catch {}\" 2>nul";
+    unsigned int values[4];
+    unsigned int count;
+
+    if (g_lastSystemFanTick != 0 && (now - g_lastSystemFanTick) < 60000U) {
+        return g_cachedSystemFan;
+    }
+
+    g_lastSystemFanTick = now;
+    g_cachedSystemFan = 255;
+    count = ReadUnsignedCommandLines(command, values, ARRAYSIZE(values), 1, 20000);
+    if (count > 0) {
+        g_cachedSystemFan = values[0];
+    }
+
+    return g_cachedSystemFan;
 }
 
 static BOOL CollectDisks(SystemStats* stats)
@@ -792,6 +981,96 @@ static void TryLoadNvml(void)
     }
 }
 
+static BOOL DetectNvidiaDisplayAdapter(void)
+{
+    DISPLAY_DEVICEA device;
+
+    memset(&device, 0, sizeof(device));
+    device.cb = sizeof(device);
+
+    for (DWORD i = 0; EnumDisplayDevicesA(NULL, i, &device, 0); ++i) {
+        if ((device.StateFlags & DISPLAY_DEVICE_MIRRORING_DRIVER) == 0 &&
+            (strstr(device.DeviceString, "NVIDIA") ||
+             strstr(device.DeviceString, "GeForce") ||
+             strstr(device.DeviceString, "RTX"))) {
+            return TRUE;
+        }
+        memset(&device, 0, sizeof(device));
+        device.cb = sizeof(device);
+    }
+
+    return FALSE;
+}
+
+static BOOL ParseNvidiaSmiLine(const char* line,
+                               double* usage,
+                               double* temperature,
+                               unsigned int* fan)
+{
+    char copy[256];
+    char* context = NULL;
+    char* token;
+    unsigned int parsed;
+    BOOL gotUsage = FALSE;
+    BOOL gotTemp = FALSE;
+
+    if (!line) {
+        return FALSE;
+    }
+
+    strncpy_s(copy, sizeof(copy), line, _TRUNCATE);
+
+    token = strtok_s(copy, ",", &context);
+    if (token && ParseUnsigned(token, &parsed)) {
+        *usage = (double)parsed;
+        gotUsage = TRUE;
+    }
+
+    token = strtok_s(NULL, ",", &context);
+    if (token && ParseUnsigned(token, &parsed)) {
+        *temperature = (double)parsed;
+        gotTemp = TRUE;
+    }
+
+    token = strtok_s(NULL, ",", &context);
+    if (token && ParseUnsigned(token, &parsed)) {
+        *fan = parsed;
+    }
+
+    return gotUsage || gotTemp;
+}
+
+static BOOL QueryNvidiaSmi(SystemStats* stats)
+{
+    static const char* commands[] = {
+        "nvidia-smi --query-gpu=utilization.gpu,temperature.gpu,fan.speed --format=csv,noheader,nounits 2>nul",
+        "\"C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvidia-smi.exe\" --query-gpu=utilization.gpu,temperature.gpu,fan.speed --format=csv,noheader,nounits 2>nul",
+        "\"C:\\Windows\\System32\\nvidia-smi.exe\" --query-gpu=utilization.gpu,temperature.gpu,fan.speed --format=csv,noheader,nounits 2>nul"
+    };
+    char line[256];
+
+    if (!stats) {
+        return FALSE;
+    }
+
+    for (int i = 0; i < ARRAYSIZE(commands); ++i) {
+        double usage = stats->gpuUsage;
+        double temperature = stats->gpuTemperature;
+        unsigned int fan = stats->gpuFanRpm;
+
+        if (ReadFirstCommandLine(commands[i], line, sizeof(line)) &&
+            ParseNvidiaSmiLine(line, &usage, &temperature, &fan)) {
+            stats->hasNvidiaGpu = TRUE;
+            stats->gpuUsage = usage;
+            stats->gpuTemperature = temperature;
+            stats->gpuFanRpm = fan;
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
 BOOL GetGPUTemperature(double* temperature)
 {
     void* device = NULL;
@@ -826,6 +1105,10 @@ static void FillGpuStats(SystemStats* stats)
 
     TryLoadNvml();
     if (!g_nvmlReady || pNvmlDeviceGetHandleByIndex(0, &device) != 0) {
+        QueryNvidiaSmi(stats);
+        if (!stats->hasNvidiaGpu && DetectNvidiaDisplayAdapter()) {
+            stats->hasNvidiaGpu = TRUE;
+        }
         return;
     }
 
@@ -840,6 +1123,7 @@ static void FillGpuStats(SystemStats* stats)
     if (pNvmlDeviceGetFanSpeed && pNvmlDeviceGetFanSpeed(device, &fan) == 0) {
         stats->gpuFanRpm = fan;
     }
+    QueryNvidiaSmi(stats);
 }
 
 static void FillIdentity(SystemStats* stats)
@@ -912,18 +1196,21 @@ BOOL GetSystemStats(SystemStats* stats)
 
     memset(stats, 0, sizeof(*stats));
     stats->cpuTemperature = 255.0;
+    stats->cpuFanRpm = 255;
     FillIdentity(stats);
 
     if (!GetCPUUsage(&stats->cpuUsage)) {
         return FALSE;
     }
     GetCPUTemperature(&stats->cpuTemperature);
+    stats->cpuFanRpm = GetSystemFanBestEffort();
     if (!GetMemoryUsage(&stats->memoryUsage)) {
         return FALSE;
     }
     if (!CollectDisks(stats)) {
         return FALSE;
     }
+    ApplyDiskTemperatures(stats);
     if (!UpdateNetworkStats(stats)) {
         return FALSE;
     }

@@ -54,7 +54,7 @@ if /I "%CONFIG%"=="Debug" (
 )
 
 set SOURCES=src\main.c src\system_monitor.c src\usb_comm.c src\protocol.c src\service.c src\firmware.c
-set LIBS=winusb.lib setupapi.lib cfgmgr32.lib pdh.lib psapi.lib iphlpapi.lib ws2_32.lib advapi32.lib powrprof.lib
+set LIBS=winusb.lib setupapi.lib cfgmgr32.lib pdh.lib psapi.lib iphlpapi.lib ws2_32.lib advapi32.lib powrprof.lib user32.lib
 
 if /I not "%BUILD_MODE%"=="setup-only" (
     cl.exe %CFLAGS% %SOURCES% /Fo"%OUTDIR%\\" /Fe"%OUTDIR%\subscreen.exe" /link %LIBS%
