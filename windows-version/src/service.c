@@ -9,7 +9,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #define SUBSCREEN_PAGE_HIBERNATE 0x82
 
@@ -575,7 +574,7 @@ static int BuildHomePage(Request* request, unsigned int order, unsigned int tota
     request->aim = HomePage_AIM;
     request->Homepage_data.order = (unsigned char)order;
     request->Homepage_data.total = (unsigned char)total;
-    request->Homepage_data.time_info.timestamp = (unsigned int)time(NULL);
+    request->Homepage_data.time_info.timestamp = ProtocolTimestamp();
     return FinalizeManualRequest(request, (int)(offsetof(Request, Homepage_data.crc) + 1));
 }
 
@@ -882,8 +881,17 @@ static BOOL EnsureConnected(SubscreenRuntime* runtime)
 
 static void DisplayStats(const SystemStats* stats)
 {
-    printf("\rCPU: %.1f%% | MEM: %.1f%% | DISKS: %u %.1f%% (%u/%u GB) | NETS: %u U %u KB/s D %u KB/s | IP: %u.%u.%u.%u",
+    char cpuTempText[16];
+
+    if (stats->cpuTemperature > 0.0 && stats->cpuTemperature < 255.0) {
+        sprintf_s(cpuTempText, sizeof(cpuTempText), "%.0fC", stats->cpuTemperature);
+    } else {
+        strcpy_s(cpuTempText, sizeof(cpuTempText), "N/A");
+    }
+
+    printf("\rCPU: %.1f%% %s | MEM: %.1f%% | DISKS: %u %.1f%% (%u/%u GB) | NETS: %u U %u KB/s D %u KB/s | IP: %u.%u.%u.%u",
            stats->cpuUsage,
+           cpuTempText,
            stats->memoryUsage,
            stats->diskCount,
            stats->diskUsage,

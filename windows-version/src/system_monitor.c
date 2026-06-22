@@ -4,6 +4,7 @@
 #include <ws2ipdef.h>
 #include <iphlpapi.h>
 #include <pdh.h>
+#include <pdhmsg.h>
 #include <psapi.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,6 +42,16 @@ typedef struct {
 
 static PDH_HQUERY g_cpuQuery = NULL;
 static PDH_HCOUNTER g_cpuTotal = NULL;
+static PDH_HQUERY g_thermalQuery = NULL;
+static PDH_HCOUNTER g_thermalZoneTemperature = NULL;
+static BOOL g_cpuTimesValid = FALSE;
+static ULONGLONG g_prevIdleTime = 0;
+static ULONGLONG g_prevKernelTime = 0;
+static ULONGLONG g_prevUserTime = 0;
+static double g_lastCpuUsage = -1.0;
+static DWORD g_lastCpuTick = 0;
+static double g_lastCpuTemperature = 255.0;
+static DWORD g_lastCpuTemperatureTick = 0;
 static NetworkHistory g_netHistory[SUBSCREEN_MAX_NETWORKS * 2];
 static HMODULE g_nvml = NULL;
 static BOOL g_nvmlAttempted = FALSE;
@@ -76,32 +87,178 @@ static void WideToAnsi(const WCHAR* value, char* target, size_t targetSize)
     WideCharToMultiByte(CP_ACP, 0, value, -1, target, (int)targetSize, NULL, NULL);
 }
 
+static ULONGLONG FileTimeToUInt64(const FILETIME* value)
+{
+    return ((ULONGLONG)value->dwHighDateTime << 32) | value->dwLowDateTime;
+}
+
+static BOOL SeedCpuTimes(void)
+{
+    FILETIME idleTime;
+    FILETIME kernelTime;
+    FILETIME userTime;
+
+    if (!GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
+        g_cpuTimesValid = FALSE;
+        return FALSE;
+    }
+
+    g_prevIdleTime = FileTimeToUInt64(&idleTime);
+    g_prevKernelTime = FileTimeToUInt64(&kernelTime);
+    g_prevUserTime = FileTimeToUInt64(&userTime);
+    g_lastCpuTick = GetTickCount();
+    g_cpuTimesValid = TRUE;
+    return TRUE;
+}
+
+static BOOL GetCPUUsageFromSystemTimes(double* cpuUsage)
+{
+    FILETIME idleTime;
+    FILETIME kernelTime;
+    FILETIME userTime;
+    ULONGLONG idle;
+    ULONGLONG kernel;
+    ULONGLONG user;
+    ULONGLONG idleDelta;
+    ULONGLONG kernelDelta;
+    ULONGLONG userDelta;
+    ULONGLONG totalDelta;
+    DWORD now;
+    DWORD elapsed;
+
+    if (!cpuUsage) {
+        return FALSE;
+    }
+
+    if (!g_cpuTimesValid && !SeedCpuTimes()) {
+        return FALSE;
+    }
+
+    now = GetTickCount();
+    elapsed = now - g_lastCpuTick;
+    if (elapsed < 200U && g_lastCpuUsage < 0.0) {
+        Sleep(200U - elapsed);
+    }
+
+    if (!GetSystemTimes(&idleTime, &kernelTime, &userTime)) {
+        return FALSE;
+    }
+
+    idle = FileTimeToUInt64(&idleTime);
+    kernel = FileTimeToUInt64(&kernelTime);
+    user = FileTimeToUInt64(&userTime);
+
+    if (idle < g_prevIdleTime || kernel < g_prevKernelTime || user < g_prevUserTime) {
+        SeedCpuTimes();
+        return FALSE;
+    }
+
+    idleDelta = idle - g_prevIdleTime;
+    kernelDelta = kernel - g_prevKernelTime;
+    userDelta = user - g_prevUserTime;
+    totalDelta = kernelDelta + userDelta;
+
+    g_prevIdleTime = idle;
+    g_prevKernelTime = kernel;
+    g_prevUserTime = user;
+    g_lastCpuTick = GetTickCount();
+
+    if (totalDelta == 0) {
+        if (g_lastCpuUsage >= 0.0) {
+            *cpuUsage = g_lastCpuUsage;
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    if (idleDelta > totalDelta) {
+        idleDelta = totalDelta;
+    }
+
+    g_lastCpuUsage = ((double)(totalDelta - idleDelta) * 100.0) / (double)totalDelta;
+    if (g_lastCpuUsage < 0.0) {
+        g_lastCpuUsage = 0.0;
+    } else if (g_lastCpuUsage > 100.0) {
+        g_lastCpuUsage = 100.0;
+    }
+
+    *cpuUsage = g_lastCpuUsage;
+    return TRUE;
+}
+
+static double NormalizeThermalZoneTemperature(double value)
+{
+    if (value > 200.0 && value < 500.0) {
+        value -= 273.15;
+    }
+
+    if (value <= 0.0 || value > 125.0) {
+        return 255.0;
+    }
+
+    return value;
+}
+
+static void InitializeThermalCounters(void)
+{
+    PDH_STATUS status;
+
+    status = PdhOpenQuery(NULL, 0, &g_thermalQuery);
+    if (status != ERROR_SUCCESS) {
+        g_thermalQuery = NULL;
+        return;
+    }
+
+    status = PdhAddEnglishCounterW(g_thermalQuery,
+                                   L"\\Thermal Zone Information(*)\\Temperature",
+                                   0,
+                                   &g_thermalZoneTemperature);
+    if (status != ERROR_SUCCESS) {
+        PdhCloseQuery(g_thermalQuery);
+        g_thermalQuery = NULL;
+        g_thermalZoneTemperature = NULL;
+        return;
+    }
+
+    PdhCollectQueryData(g_thermalQuery);
+}
+
 BOOL InitializePerformanceCounters(void)
 {
     PDH_STATUS status;
 
+    if (!SeedCpuTimes()) {
+        printf("Failed to seed CPU times (%lu).\n", GetLastError());
+        return FALSE;
+    }
+
     status = PdhOpenQuery(NULL, 0, &g_cpuQuery);
     if (status != ERROR_SUCCESS) {
-        printf("Failed to open CPU query: 0x%lx\n", status);
-        return FALSE;
+        printf("Warning: failed to open CPU PDH query: 0x%lx\n", status);
+        g_cpuQuery = NULL;
+        InitializeThermalCounters();
+        return TRUE;
     }
 
     status = PdhAddEnglishCounterW(g_cpuQuery, L"\\Processor(_Total)\\% Processor Time", 0, &g_cpuTotal);
     if (status != ERROR_SUCCESS) {
-        printf("Failed to add CPU counter: 0x%lx\n", status);
+        printf("Warning: failed to add CPU PDH counter: 0x%lx\n", status);
         PdhCloseQuery(g_cpuQuery);
         g_cpuQuery = NULL;
-        return FALSE;
+        g_cpuTotal = NULL;
+        InitializeThermalCounters();
+        return TRUE;
     }
 
     status = PdhCollectQueryData(g_cpuQuery);
     if (status != ERROR_SUCCESS) {
-        printf("Failed to collect CPU query data: 0x%lx\n", status);
+        printf("Warning: failed to collect CPU PDH query data: 0x%lx\n", status);
         PdhCloseQuery(g_cpuQuery);
         g_cpuQuery = NULL;
-        return FALSE;
+        g_cpuTotal = NULL;
     }
 
+    InitializeThermalCounters();
     return TRUE;
 }
 
@@ -112,6 +269,15 @@ void CleanupPerformanceCounters(void)
         g_cpuQuery = NULL;
         g_cpuTotal = NULL;
     }
+    if (g_thermalQuery) {
+        PdhCloseQuery(g_thermalQuery);
+        g_thermalQuery = NULL;
+        g_thermalZoneTemperature = NULL;
+    }
+    g_cpuTimesValid = FALSE;
+    g_lastCpuUsage = -1.0;
+    g_lastCpuTemperature = 255.0;
+    g_lastCpuTemperatureTick = 0;
     if (g_nvmlReady && pNvmlShutdown) {
         pNvmlShutdown();
     }
@@ -128,7 +294,15 @@ BOOL GetCPUUsage(double* cpuUsage)
     PDH_FMT_COUNTERVALUE counterValue;
     PDH_STATUS status;
 
-    if (!cpuUsage || !g_cpuQuery || !g_cpuTotal) {
+    if (!cpuUsage) {
+        return FALSE;
+    }
+
+    if (GetCPUUsageFromSystemTimes(cpuUsage)) {
+        return TRUE;
+    }
+
+    if (!g_cpuQuery || !g_cpuTotal) {
         return FALSE;
     }
 
@@ -144,6 +318,74 @@ BOOL GetCPUUsage(double* cpuUsage)
 
     *cpuUsage = counterValue.doubleValue;
     return TRUE;
+}
+
+BOOL GetCPUTemperature(double* temperature)
+{
+    DWORD now = GetTickCount();
+    PDH_STATUS status;
+    DWORD bufferSize = 0;
+    DWORD itemCount = 0;
+    PPDH_FMT_COUNTERVALUE_ITEM_W items;
+    double best = 255.0;
+
+    if (!temperature) {
+        return FALSE;
+    }
+
+    if (g_lastCpuTemperatureTick != 0 && (now - g_lastCpuTemperatureTick) < 30000U) {
+        *temperature = g_lastCpuTemperature;
+        return g_lastCpuTemperature < 255.0;
+    }
+
+    g_lastCpuTemperatureTick = now;
+    g_lastCpuTemperature = 255.0;
+
+    if (!g_thermalQuery || !g_thermalZoneTemperature) {
+        *temperature = g_lastCpuTemperature;
+        return FALSE;
+    }
+
+    status = PdhCollectQueryData(g_thermalQuery);
+    if (status != ERROR_SUCCESS) {
+        *temperature = g_lastCpuTemperature;
+        return FALSE;
+    }
+
+    status = PdhGetFormattedCounterArrayW(g_thermalZoneTemperature,
+                                          PDH_FMT_DOUBLE,
+                                          &bufferSize,
+                                          &itemCount,
+                                          NULL);
+    if (status != PDH_MORE_DATA || bufferSize == 0 || itemCount == 0) {
+        *temperature = g_lastCpuTemperature;
+        return FALSE;
+    }
+
+    items = (PPDH_FMT_COUNTERVALUE_ITEM_W)calloc(1, bufferSize);
+    if (!items) {
+        *temperature = g_lastCpuTemperature;
+        return FALSE;
+    }
+
+    status = PdhGetFormattedCounterArrayW(g_thermalZoneTemperature,
+                                          PDH_FMT_DOUBLE,
+                                          &bufferSize,
+                                          &itemCount,
+                                          items);
+    if (status == ERROR_SUCCESS) {
+        for (DWORD i = 0; i < itemCount; ++i) {
+            double value = NormalizeThermalZoneTemperature(items[i].FmtValue.doubleValue);
+            if (value < 255.0 && (best >= 255.0 || value > best)) {
+                best = value;
+            }
+        }
+    }
+
+    free(items);
+    g_lastCpuTemperature = best;
+    *temperature = g_lastCpuTemperature;
+    return g_lastCpuTemperature < 255.0;
 }
 
 BOOL GetMemoryUsage(double* memoryUsage)
@@ -675,6 +917,7 @@ BOOL GetSystemStats(SystemStats* stats)
     if (!GetCPUUsage(&stats->cpuUsage)) {
         return FALSE;
     }
+    GetCPUTemperature(&stats->cpuTemperature);
     if (!GetMemoryUsage(&stats->memoryUsage)) {
         return FALSE;
     }

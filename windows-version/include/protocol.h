@@ -272,5 +272,6 @@ void append_crc(Request* request);
 int init_hidreport(Request* request, unsigned char cmd, unsigned char aim, unsigned char index);
 int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim, unsigned char total, unsigned char order);
 BOOL ProtocolSelfTest(BOOL verbose);
+unsigned int ProtocolTimestamp(void);
 
 #endif // PROTOCOL_H

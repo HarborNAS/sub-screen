@@ -18,6 +18,26 @@ typedef char request_data_offset_check[(REQUEST_DATA_OFFSET == 6) ? 1 : -1];
 
 static unsigned char g_sequence = 0;
 
+static long GetLocalUtcOffsetSeconds(void)
+{
+    TIME_ZONE_INFORMATION timeZone;
+    DWORD zoneId = GetTimeZoneInformation(&timeZone);
+    LONG bias = timeZone.Bias;
+
+    if (zoneId == TIME_ZONE_ID_DAYLIGHT) {
+        bias += timeZone.DaylightBias;
+    } else if (zoneId == TIME_ZONE_ID_STANDARD) {
+        bias += timeZone.StandardBias;
+    }
+
+    return -(long)bias * 60L;
+}
+
+unsigned int ProtocolTimestamp(void)
+{
+    return (unsigned int)((long long)time(NULL) + (long long)GetLocalUtcOffsetSeconds());
+}
+
 unsigned char calculate_crc(const unsigned char* data, int length)
 {
     unsigned char crc = 0;
@@ -148,7 +168,7 @@ int init_hidreport(Request* request, unsigned char cmd, unsigned char aim, unsig
 
     switch (aim) {
     case TIME_AIM:
-        request->time_data.time_info.timestamp = (unsigned int)time(NULL);
+        request->time_data.time_info.timestamp = ProtocolTimestamp();
         return FinalizeLength(request, offsetof(Request, time_data.crc) + 1);
     case System_AIM:
         request->system_data.system_info.sys_id = index;
@@ -198,7 +218,7 @@ int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,
     case HomePage_AIM:
         request->Homepage_data.order = order;
         request->Homepage_data.total = total;
-        request->Homepage_data.time_info.timestamp = (unsigned int)time(NULL);
+        request->Homepage_data.time_info.timestamp = ProtocolTimestamp();
         return FinalizeLength(request, offsetof(Request, Homepage_data.crc) + 1);
     case SystemPage_AIM:
         request->SystemPage_data.order = order;

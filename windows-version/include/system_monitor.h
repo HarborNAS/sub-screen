@@ -61,6 +61,7 @@ BOOL InitializePerformanceCounters(void);
 void CleanupPerformanceCounters(void);
 BOOL GetSystemStats(SystemStats* stats);
 BOOL GetCPUUsage(double* cpuUsage);
+BOOL GetCPUTemperature(double* temperature);
 BOOL GetMemoryUsage(double* memoryUsage);
 BOOL GetDiskUsage(double* diskUsage);
 BOOL GetNetworkUsage(double* networkUsage);
