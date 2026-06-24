@@ -2,3 +2,5 @@
 
 1 RT_MANIFEST "src\\setup.manifest"
 IDR_SUBSCREEN_EXE RCDATA "build\\Release\\subscreen.exe"
+IDR_PAWNIO_LPC_ACPIEC_BIN RCDATA "resources\\PawnIo\\LpcACPIEC.bin"
+IDR_PAWNIO_SETUP_EXE RCDATA "resources\\PawnIo\\PawnIO_setup.exe"

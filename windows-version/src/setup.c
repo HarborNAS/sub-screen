@@ -453,9 +453,9 @@ static BOOL EnsureDirectories(const WCHAR* installDir)
     return TRUE;
 }
 
-static BOOL ExtractSubscreenExe(const WCHAR* destination)
+static BOOL ExtractResourceFile(int resourceId, const WCHAR* destination, const WCHAR* label)
 {
-    HRSRC resource = FindResourceW(NULL, MAKEINTRESOURCEW(IDR_SUBSCREEN_EXE), RT_RCDATA);
+    HRSRC resource = FindResourceW(NULL, MAKEINTRESOURCEW(resourceId), RT_RCDATA);
     HGLOBAL loaded;
     DWORD size;
     const void* data;
@@ -463,7 +463,7 @@ static BOOL ExtractSubscreenExe(const WCHAR* destination)
     DWORD written = 0;
 
     if (!resource) {
-        PrintWin32Error(L"FindResource subscreen.exe", GetLastError());
+        PrintWin32Error(label, GetLastError());
         return FALSE;
     }
 
@@ -471,7 +471,7 @@ static BOOL ExtractSubscreenExe(const WCHAR* destination)
     size = SizeofResource(NULL, resource);
     data = LockResource(loaded);
     if (!loaded || !data || size == 0) {
-        fwprintf(stderr, L"Embedded subscreen.exe resource is invalid.\n");
+        fwprintf(stderr, L"Embedded %ls resource is invalid.\n", label);
         return FALSE;
     }
 
@@ -487,7 +487,7 @@ static BOOL ExtractSubscreenExe(const WCHAR* destination)
         Sleep(500);
     }
     if (file == INVALID_HANDLE_VALUE) {
-        PrintWin32Error(L"Create installed subscreen.exe", GetLastError());
+        PrintWin32Error(destination, GetLastError());
         return FALSE;
     }
 
@@ -500,6 +500,11 @@ static BOOL ExtractSubscreenExe(const WCHAR* destination)
     CloseHandle(file);
     wprintf(L"Installed %ls (%lu bytes).\n", destination, size);
     return TRUE;
+}
+
+static BOOL ExtractSubscreenExe(const WCHAR* destination)
+{
+    return ExtractResourceFile(IDR_SUBSCREEN_EXE, destination, L"subscreen.exe");
 }
 
 static DWORD RunProcessWait(const WCHAR* commandLine)
@@ -533,6 +538,42 @@ static DWORD RunProcessWait(const WCHAR* commandLine)
     CloseHandle(pi.hProcess);
     free(mutableCommand);
     return exitCode;
+}
+
+static BOOL InstallPawnIoDriver(void)
+{
+    WCHAR tempDir[MAX_PATH];
+    WCHAR setupPath[MAX_PATH];
+    WCHAR commandLine[MAX_PATH * 2];
+    DWORD exitCode;
+
+    if (!GetTempPathW(ARRAYSIZE(tempDir), tempDir)) {
+        PrintWin32Error(L"GetTempPath", GetLastError());
+        return FALSE;
+    }
+
+    swprintf_s(setupPath, ARRAYSIZE(setupPath), L"%lsHarborSubscreen-PawnIO_setup.exe", tempDir);
+    if (!ExtractResourceFile(IDR_PAWNIO_SETUP_EXE, setupPath, L"PawnIO_setup.exe")) {
+        return FALSE;
+    }
+
+    swprintf_s(commandLine,
+               ARRAYSIZE(commandLine),
+               L"\"%ls\" -install -silent",
+               setupPath);
+    exitCode = RunProcessWait(commandLine);
+    DeleteFileW(setupPath);
+    if (exitCode == 0 || exitCode == ERROR_ALREADY_EXISTS) {
+        wprintf(L"PawnIO sensor driver is installed.\n");
+        return TRUE;
+    }
+
+    if (exitCode != 0) {
+        fwprintf(stderr, L"PawnIO setup returned %lu; CPU temperature/fan telemetry may be unavailable.\n", exitCode);
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 static BOOL StopServiceIfPresent(BOOL deleteService)
@@ -618,16 +659,19 @@ static int InstallFlow(void)
 {
     WCHAR installDir[MAX_PATH];
     WCHAR exePath[MAX_PATH];
+    WCHAR ecModulePath[MAX_PATH];
     WCHAR commandLine[MAX_PATH * 2];
 
     if (!BuildInstallPath(installDir, ARRAYSIZE(installDir), exePath, ARRAYSIZE(exePath))) {
         return 1;
     }
+    swprintf_s(ecModulePath, ARRAYSIZE(ecModulePath), L"%ls\\LpcACPIEC.bin", installDir);
     if (!EnsureDirectories(installDir)) {
         return 1;
     }
 
     StopServiceIfPresent(TRUE);
+    InstallPawnIoDriver();
 
     if (!BindWinUsbAndGuid()) {
         fwprintf(stderr, L"WinUSB binding failed; setup cannot continue.\n");
@@ -635,6 +679,9 @@ static int InstallFlow(void)
     }
 
     if (!ExtractSubscreenExe(exePath)) {
+        return 1;
+    }
+    if (!ExtractResourceFile(IDR_PAWNIO_LPC_ACPIEC_BIN, ecModulePath, L"LpcACPIEC.bin")) {
         return 1;
     }
 
@@ -668,13 +715,16 @@ static int UninstallFlow(void)
 {
     WCHAR installDir[MAX_PATH];
     WCHAR exePath[MAX_PATH];
+    WCHAR ecModulePath[MAX_PATH];
 
     if (!BuildInstallPath(installDir, ARRAYSIZE(installDir), exePath, ARRAYSIZE(exePath))) {
         return 1;
     }
+    swprintf_s(ecModulePath, ARRAYSIZE(ecModulePath), L"%ls\\LpcACPIEC.bin", installDir);
 
     StopServiceIfPresent(TRUE);
     DeleteFileW(exePath);
+    DeleteFileW(ecModulePath);
     RemoveDirectoryW(installDir);
     wprintf(L"HarborOS Subscreen application removed. WinUSB binding was left intact.\n");
     return 0;

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <wchar.h>
 #include <ws2tcpip.h>
 
 #pragma comment(lib, "iphlpapi.lib")
@@ -62,6 +63,9 @@ static NetworkHistory g_netHistory[SUBSCREEN_MAX_NETWORKS * 2];
 static HMODULE g_nvml = NULL;
 static BOOL g_nvmlAttempted = FALSE;
 static BOOL g_nvmlReady = FALSE;
+static BOOL g_pawnEcAttempted = FALSE;
+static BOOL g_pawnEcReady = FALSE;
+static HANDLE g_pawnEc = INVALID_HANDLE_VALUE;
 static NvmlInitFn pNvmlInit = NULL;
 static NvmlShutdownFn pNvmlShutdown = NULL;
 static NvmlDeviceGetHandleByIndexFn pNvmlDeviceGetHandleByIndex = NULL;
@@ -207,6 +211,305 @@ static unsigned char SensorTemperatureByte(unsigned int value)
         return 255;
     }
     return (unsigned char)value;
+}
+
+#define PAWNIO_DEVICE_TYPE (41394UL << 16)
+#define PAWNIO_IOCTL_LOAD_BINARY (PAWNIO_DEVICE_TYPE | (0x821UL << 2))
+#define PAWNIO_IOCTL_EXECUTE_FN (PAWNIO_DEVICE_TYPE | (0x841UL << 2))
+#define PAWNIO_FN_NAME_LENGTH 32U
+#define EC_DATA_PORT 0x62U
+#define EC_COMMAND_PORT 0x66U
+#define EC_CMD_READ_RAM 0x80U
+
+static BOOL ContainsAsciiNoCase(const char* text, const char* needle)
+{
+    size_t needleLen;
+
+    if (!text || !needle) {
+        return FALSE;
+    }
+
+    needleLen = strlen(needle);
+    if (needleLen == 0) {
+        return TRUE;
+    }
+
+    for (; *text; ++text) {
+        size_t i = 0;
+        while (i < needleLen &&
+               text[i] &&
+               (char)tolower((unsigned char)text[i]) == (char)tolower((unsigned char)needle[i])) {
+            ++i;
+        }
+        if (i == needleLen) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static BOOL IsHarborNasN1(const SystemStats* stats)
+{
+    if (!stats) {
+        return FALSE;
+    }
+    return ContainsAsciiNoCase(stats->modelName, "NAS-N1") ||
+           ContainsAsciiNoCase(stats->modelName, "NAS N1") ||
+           ContainsAsciiNoCase(stats->serialNumber, "F13S") ||
+           ContainsAsciiNoCase(stats->hostName, "NAS-N1");
+}
+
+static BOOL BuildExeSiblingPath(WCHAR* path, DWORD pathCount, const WCHAR* fileName)
+{
+    WCHAR* slash;
+
+    if (!path || pathCount == 0 || !fileName) {
+        return FALSE;
+    }
+
+    if (!GetModuleFileNameW(NULL, path, pathCount)) {
+        return FALSE;
+    }
+
+    slash = wcsrchr(path, L'\\');
+    if (!slash) {
+        return FALSE;
+    }
+    slash[1] = L'\0';
+
+    return wcsncat_s(path, pathCount, fileName, _TRUNCATE) == 0;
+}
+
+static BOOL ReadBinaryFile(const WCHAR* path, BYTE** data, DWORD* size)
+{
+    HANDLE file;
+    LARGE_INTEGER fileSize;
+    DWORD read = 0;
+    BYTE* buffer;
+
+    if (!path || !data || !size) {
+        return FALSE;
+    }
+
+    *data = NULL;
+    *size = 0;
+
+    file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
+
+    if (!GetFileSizeEx(file, &fileSize) || fileSize.QuadPart <= 0 || fileSize.QuadPart > 1024 * 1024) {
+        CloseHandle(file);
+        return FALSE;
+    }
+
+    buffer = (BYTE*)malloc((size_t)fileSize.QuadPart);
+    if (!buffer) {
+        CloseHandle(file);
+        return FALSE;
+    }
+
+    if (!ReadFile(file, buffer, (DWORD)fileSize.QuadPart, &read, NULL) || read != (DWORD)fileSize.QuadPart) {
+        free(buffer);
+        CloseHandle(file);
+        return FALSE;
+    }
+
+    CloseHandle(file);
+    *data = buffer;
+    *size = read;
+    return TRUE;
+}
+
+static BOOL EnsurePawnEcModule(void)
+{
+    WCHAR modulePath[MAX_PATH];
+    BYTE* module = NULL;
+    DWORD moduleSize = 0;
+    DWORD returned = 0;
+
+    if (g_pawnEcAttempted) {
+        return g_pawnEcReady;
+    }
+    g_pawnEcAttempted = TRUE;
+
+    g_pawnEc = CreateFileW(L"\\\\?\\GLOBALROOT\\Device\\PawnIO",
+                           GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                           NULL,
+                           OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL,
+                           NULL);
+    if (g_pawnEc == INVALID_HANDLE_VALUE) {
+        return FALSE;
+    }
+
+    if (!BuildExeSiblingPath(modulePath, ARRAYSIZE(modulePath), L"LpcACPIEC.bin") ||
+        !ReadBinaryFile(modulePath, &module, &moduleSize)) {
+        CloseHandle(g_pawnEc);
+        g_pawnEc = INVALID_HANDLE_VALUE;
+        return FALSE;
+    }
+
+    if (!DeviceIoControl(g_pawnEc,
+                         PAWNIO_IOCTL_LOAD_BINARY,
+                         module,
+                         moduleSize,
+                         NULL,
+                         0,
+                         &returned,
+                         NULL)) {
+        free(module);
+        CloseHandle(g_pawnEc);
+        g_pawnEc = INVALID_HANDLE_VALUE;
+        return FALSE;
+    }
+
+    free(module);
+    g_pawnEcReady = TRUE;
+    return TRUE;
+}
+
+static BOOL PawnIoExecute(const char* name,
+                          const LONGLONG* input,
+                          DWORD inputCount,
+                          LONGLONG* output,
+                          DWORD outputCount,
+                          DWORD* returnedCount)
+{
+    DWORD inputBytes;
+    DWORD outputBytes;
+    DWORD bytesReturned = 0;
+    BYTE* packedInput;
+    BOOL ok;
+
+    if (!EnsurePawnEcModule() || !name) {
+        return FALSE;
+    }
+
+    inputBytes = PAWNIO_FN_NAME_LENGTH + inputCount * sizeof(LONGLONG);
+    outputBytes = outputCount * sizeof(LONGLONG);
+    packedInput = (BYTE*)calloc(1, inputBytes);
+    if (!packedInput) {
+        return FALSE;
+    }
+
+    strncpy_s((char*)packedInput, PAWNIO_FN_NAME_LENGTH, name, _TRUNCATE);
+    if (input && inputCount > 0) {
+        memcpy(packedInput + PAWNIO_FN_NAME_LENGTH, input, inputCount * sizeof(LONGLONG));
+    }
+
+    ok = DeviceIoControl(g_pawnEc,
+                         PAWNIO_IOCTL_EXECUTE_FN,
+                         packedInput,
+                         inputBytes,
+                         output,
+                         outputBytes,
+                         &bytesReturned,
+                         NULL);
+    free(packedInput);
+
+    if (!ok) {
+        return FALSE;
+    }
+    if (returnedCount) {
+        *returnedCount = bytesReturned / sizeof(LONGLONG);
+    }
+    return TRUE;
+}
+
+static BOOL PawnEcReadPort(unsigned int port, unsigned char* value)
+{
+    LONGLONG input[1];
+    LONGLONG output[1] = {0};
+    DWORD returned = 0;
+
+    if (!value) {
+        return FALSE;
+    }
+
+    input[0] = (LONGLONG)port;
+    if (!PawnIoExecute("ioctl_pio_read", input, 1, output, 1, &returned) || returned < 1) {
+        return FALSE;
+    }
+
+    *value = (unsigned char)output[0];
+    return TRUE;
+}
+
+static BOOL PawnEcWritePort(unsigned int port, unsigned char value)
+{
+    LONGLONG input[2];
+
+    input[0] = (LONGLONG)port;
+    input[1] = (LONGLONG)value;
+    return PawnIoExecute("ioctl_pio_write", input, 2, NULL, 0, NULL);
+}
+
+static BOOL PawnEcWaitReady(void)
+{
+    for (int i = 0; i < 1000; ++i) {
+        unsigned char status = 0;
+        if (!PawnEcReadPort(EC_COMMAND_PORT, &status)) {
+            return FALSE;
+        }
+        if ((status & 0x02U) == 0) {
+            return TRUE;
+        }
+        Sleep(1);
+    }
+    return FALSE;
+}
+
+static BOOL PawnEcReadRamByte(unsigned char address, unsigned char* value)
+{
+    if (!value) {
+        return FALSE;
+    }
+
+    if (!PawnEcWaitReady() ||
+        !PawnEcWritePort(EC_COMMAND_PORT, EC_CMD_READ_RAM) ||
+        !PawnEcWaitReady() ||
+        !PawnEcWritePort(EC_DATA_PORT, address) ||
+        !PawnEcWaitReady()) {
+        return FALSE;
+    }
+
+    Sleep(3);
+    return PawnEcReadPort(EC_DATA_PORT, value);
+}
+
+static BOOL GetHarborEcTelemetry(double* cpuTemperature, unsigned int* fanEncoded)
+{
+    unsigned char temp = 0;
+    unsigned char fanHigh = 0;
+    unsigned char fanLow = 0;
+    unsigned int rawFan;
+    unsigned int encodedFan;
+    BOOL ok = FALSE;
+
+    if (cpuTemperature &&
+        PawnEcReadRamByte(0x70, &temp) &&
+        temp > 0 &&
+        temp < 125) {
+        *cpuTemperature = (double)temp;
+        ok = TRUE;
+    }
+
+    if (fanEncoded &&
+        PawnEcReadRamByte(0x76, &fanHigh) &&
+        PawnEcReadRamByte(0x77, &fanLow)) {
+        rawFan = (unsigned int)fanHigh * 0xFFU + (unsigned int)fanLow;
+        encodedFan = rawFan / 42U;
+        if (encodedFan > 0 && encodedFan < 255U) {
+            *fanEncoded = encodedFan;
+            ok = TRUE;
+        }
+    }
+
+    return ok;
 }
 
 static ULONGLONG FileTimeToUInt64(const FILETIME* value)
@@ -413,6 +716,12 @@ void CleanupPerformanceCounters(void)
     }
     g_nvmlReady = FALSE;
     g_nvmlAttempted = FALSE;
+    if (g_pawnEc != INVALID_HANDLE_VALUE) {
+        CloseHandle(g_pawnEc);
+        g_pawnEc = INVALID_HANDLE_VALUE;
+    }
+    g_pawnEcReady = FALSE;
+    g_pawnEcAttempted = FALSE;
 }
 
 BOOL GetCPUUsage(double* cpuUsage)
@@ -1190,6 +1499,10 @@ static void FillIdentity(SystemStats* stats)
 
 BOOL GetSystemStats(SystemStats* stats)
 {
+    BOOL hasHarborEc = FALSE;
+    double harborCpuTemperature = 255.0;
+    unsigned int harborFanEncoded = 255;
+
     if (!stats) {
         return FALSE;
     }
@@ -1202,8 +1515,19 @@ BOOL GetSystemStats(SystemStats* stats)
     if (!GetCPUUsage(&stats->cpuUsage)) {
         return FALSE;
     }
-    GetCPUTemperature(&stats->cpuTemperature);
-    stats->cpuFanRpm = GetSystemFanBestEffort();
+    if (IsHarborNasN1(stats)) {
+        hasHarborEc = GetHarborEcTelemetry(&harborCpuTemperature, &harborFanEncoded);
+    }
+    if (hasHarborEc && harborCpuTemperature > 0.0 && harborCpuTemperature < 255.0) {
+        stats->cpuTemperature = harborCpuTemperature;
+    } else {
+        GetCPUTemperature(&stats->cpuTemperature);
+    }
+    if (hasHarborEc && harborFanEncoded > 0U && harborFanEncoded < 255U) {
+        stats->cpuFanRpm = harborFanEncoded;
+    } else {
+        stats->cpuFanRpm = GetSystemFanBestEffort();
+    }
     if (!GetMemoryUsage(&stats->memoryUsage)) {
         return FALSE;
     }
