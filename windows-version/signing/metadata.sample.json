@@ -1,0 +1,5 @@
+{
+  "Endpoint": "https://<your-artifact-signing-endpoint>",
+  "CodeSigningAccountName": "<your-code-signing-account-name>",
+  "CertificateProfileName": "<your-certificate-profile-name>"
+}
