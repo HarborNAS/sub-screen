@@ -28,6 +28,7 @@ On reinstallation, the installer preserves a supported safe `runtime.env` and ba
 
 ```bash
 bash /boot/config/plugins/harboros-subscreen/rc.harboros-subscreen status
+grep -F 'Runtime policy:' /var/log/harboros-subscreen.log | tail -n 1
 tail -n 60 /var/log/harboros-subscreen.log
 ```
 
@@ -86,7 +87,13 @@ Use the downloaded installer:
 bash /tmp/harboros-subscreen-install.sh uninstall
 ```
 
-If `/tmp` was cleared by a reboot, download the same version-pinned script again with the `curl` command above, then run `uninstall` instead of `install`.
+If `/tmp` was cleared by a reboot, download the version-pinned installer again and run its uninstall action:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/HarborNAS/sub-screen/unraid-v0.1.0-test.1/unraid/install.sh \
+  -o /tmp/harboros-subscreen-install.sh &&
+bash /tmp/harboros-subscreen-install.sh uninstall
+```
 
 Uninstallation stops the service and removes its managed runtime and installation files. Previous-installation backups under `/boot/config/harboros-subscreen-backups/` are retained.
 

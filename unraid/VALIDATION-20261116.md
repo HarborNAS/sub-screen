@@ -39,9 +39,31 @@ These checks did not enable automatic startup or create a persistent service ins
 
 ## Release checks
 
-The release workflow builds the isolated `unraid/src/panel.c` variant with native GCC, runs the EC mock and installer fixture tests, and verifies deterministic packaging. The GitHub Actions result records whether those checks passed for a given commit.
+The [native Linux CI run](https://github.com/HarborNAS/sub-screen/actions/runs/43820158321) passed for source commit `9e6f2e1e5f660c99fbddc1729df1c78cfc2f896a`. It built the isolated `unraid/src/panel.c` variant with GCC, passed the EC mock and 12 installer fixture scenarios, and verified repeatable packaging.
 
-The native release artifact and complete persistent installer procedure require a separate physical-hardware check before release. Update this record with that artifact's checksum and result when completed; the historical probe result alone does not establish that a newly built artifact was hardware-tested.
+The native executable from that CI artifact was installed and tested on the same physical Nexus. Its ELF SHA-256 is:
+
+```text
+97329342f149c17f973505e388489e07aef4f2a9caabe407ccb4f2b8564533ad
+```
+
+The prepublication test used the unchanged installer with a narrowly scoped local download fixture serving the CI archive and checksum. All subsequent installer steps ran against the real Unraid paths. This separated hardware and installation validation from the public GitHub download check.
+
+Observed results:
+
+- The archive checksum and expected contents passed validation.
+- The native executable's dependencies resolved, and the host, OS, and USB panel checks passed.
+- Installation persisted files under `/boot/config/plugins/harboros-subscreen/` and launched the identical executable from `/usr/local/libexec/harboros-subscreen/` in RAM.
+- The running process reported all four runtime policy flags off, opened and claimed the USB interface, and received device replies.
+- The service remained running after the installing SSH connection closed; status passed on a new connection.
+- Stop completed cleanly, including `USB device closed`; status then reported `stopped`.
+- No failure, segmentation-fault, or libusb-error log lines were observed.
+- Uninstall removed the managed installation, runtime binary, PID, and installer lock.
+- `/boot/config/go` retained its original checksum. The Unraid array remained stopped throughout.
+
+The physical screen and touch confirmation above applies to the initial probe; the native release test additionally verified the logged device exchange and installation lifecycle. It does not constitute a second operator confirmation of every screen.
+
+The final release archive checksum is published in its `.sha256` asset and release notes. Packaging timestamps and documentation revisions can change the archive checksum without changing the executable. The final public download and installation result is recorded in the [release notes](https://github.com/HarborNAS/sub-screen/releases/tag/unraid-v0.1.0-test.1).
 
 ## Boundaries
 
