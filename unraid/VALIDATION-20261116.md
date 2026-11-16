@@ -63,7 +63,34 @@ Observed results:
 
 The physical screen and touch confirmation above applies to the initial probe; the native release test additionally verified the logged device exchange and installation lifecycle. It does not constitute a second operator confirmation of every screen.
 
-The final release archive checksum is published in its `.sha256` asset and release notes. Packaging timestamps and documentation revisions can change the archive checksum without changing the executable. The final public download and installation result is recorded in the [release notes](https://github.com/HarborNAS/sub-screen/releases/tag/unraid-v0.1.0-test.1).
+The final release archive checksum is published in its `.sha256` asset and release notes. Packaging timestamps and documentation revisions can change the archive checksum without changing the executable.
+
+## Public release installation
+
+The published `unraid-v0.1.0-test.1` assets were then downloaded directly from GitHub Releases by the Nexus and installed with the public curl command. No download fixture or proxy was used for this check. The `install.sh` attachment is byte-for-byte identical to the tagged source.
+
+- Public installer, archive, and checksum downloads matched the published files. The running ELF retained the SHA-256 shown above.
+- Installation and status passed. The process remained running after SSH disconnected and was checked after 68 seconds.
+- All four policy flags remained off. USB claim and device replies succeeded; no failure, segmentation-fault, or libusb-error log lines were observed.
+- Stop closed the USB device cleanly. Uninstall removed the managed installation, runtime, PID, and installer lock.
+- The startup configuration checksum was unchanged and the array remained stopped.
+- Both the main-branch and release-tag CI runs passed.
+
+The test network reset connections to `raw.githubusercontent.com`, while GitHub Release downloads worked. The current guide therefore uses the attached installer as its primary download. The script and archive in the release tag were not changed after publication.
+
+Final archive SHA-256:
+
+```text
+4a35a98beb72af4bd853737d94c1e3143e73aac4b1b639e2c8b275c979d4ecf2
+```
+
+Installer SHA-256:
+
+```text
+bc6f07158c3760fbe9d4bbdca38a5bfbb4b4160e9327ad087ced80337f62f064
+```
+
+See the [release notes](https://github.com/HarborNAS/sub-screen/releases/tag/unraid-v0.1.0-test.1) for the public download command and assets.
 
 ## Boundaries
 

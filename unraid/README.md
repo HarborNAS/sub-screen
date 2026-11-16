@@ -13,10 +13,12 @@ Open a **root** terminal in the Unraid WebGUI or connect using SSH. If Unraid bo
 Download the version-pinned installer, then run it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HarborNAS/sub-screen/unraid-v0.1.0-test.1/unraid/install.sh \
+curl -fsSL https://github.com/HarborNAS/sub-screen/releases/download/unraid-v0.1.0-test.1/install.sh \
   -o /tmp/harboros-subscreen-install.sh &&
 bash /tmp/harboros-subscreen-install.sh install
 ```
+
+The same script is also available from the [version-pinned source](https://raw.githubusercontent.com/HarborNAS/sub-screen/unraid-v0.1.0-test.1/unraid/install.sh).
 
 The installer downloads this release's archive and checksum, verifies the download and archive contents, checks the host, installs the files, and starts the service. It uses the Linux binary in the Unraid package; the HarborOS `.deb` and Windows `.exe` are separate builds.
 
@@ -90,7 +92,7 @@ bash /tmp/harboros-subscreen-install.sh uninstall
 If `/tmp` was cleared by a reboot, download the version-pinned installer again and run its uninstall action:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HarborNAS/sub-screen/unraid-v0.1.0-test.1/unraid/install.sh \
+curl -fsSL https://github.com/HarborNAS/sub-screen/releases/download/unraid-v0.1.0-test.1/install.sh \
   -o /tmp/harboros-subscreen-install.sh &&
 bash /tmp/harboros-subscreen-install.sh uninstall
 ```
@@ -101,10 +103,11 @@ Uninstallation stops the service and removes its managed runtime and installatio
 
 Release assets are available on the [Unraid test release page](https://github.com/HarborNAS/sub-screen/releases/tag/unraid-v0.1.0-test.1):
 
+- `install.sh`
 - `harboros-subscreen-unraid-v0.1.0-test.1-x86_64.tgz`
 - `harboros-subscreen-unraid-v0.1.0-test.1-x86_64.tgz.sha256`
 
-The archive contains the executable, preflight script, launcher, safe environment template, and this guide. It contains no panel firmware. The installer is maintained separately at `unraid/install.sh` in the release tag.
+The archive contains the executable, preflight script, launcher, safe environment template, and this guide. It contains no panel firmware. `install.sh` is a separate Release attachment; its source is `unraid/install.sh` in the same tag.
 
 ## Build and test from source
 
