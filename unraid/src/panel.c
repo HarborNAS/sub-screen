@@ -1,0 +1,5225 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include "protocol.h"
+#include <time.h>
+#include <unistd.h>
+#include <string.h>
+#include <stddef.h>
+#include <sys/sysinfo.h>
+#include <sys/statvfs.h>
+#include <mntent.h>
+#include <dirent.h>
+#include <utmp.h>
+#include <sys/stat.h>
+#include <sys/mount.h>
+#include <sys/statvfs.h>
+#include <sys/io.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <stdint.h>
+#include <regex.h>
+//异步HID通信
+#include <pthread.h>
+#include <signal.h>
+
+#include <ctype.h>
+#include <stdarg.h>
+// Discrete GPU.  The current implementation queries nvidia-smi and only
+// keeps this legacy type for the page-data structure; NVML headers are not
+// installed on AMD-only Unraid hosts.
+#if defined(__has_include)
+#  if __has_include(<nvml.h>)
+#    include <nvml.h>
+#  else
+typedef int nvmlTemperatureSensors_t;
+#  endif
+#else
+#  include <nvml.h>
+#endif
+#include <glob.h>
+
+//WLAN
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+#include <linux/ethtool.h>
+#include <linux/sockios.h>
+#include <libusb-1.0/libusb.h>
+
+#define VENDORID 0x5448
+#define PRODUCTID 0x0002
+
+#define TIMEOUT_MS   5000    // 传输超时时间（毫秒）
+#define EP_IN        0x81    // 批量输入端点
+#define EP_OUT       0x02    // 批量输出端点
+#define INTERFACE    0x00    // 接口号
+#define DebugToken   true
+#define SensorLog   true
+#define IfNoPanel   false
+#define hidwritedebug true
+#define OTA             true
+#define FIRMWARE_PATH "/usr/bin/firmware"
+#define MAXLEN 0x40
+#define DURATION 1
+#define MAX_PATH 256
+#define MAX_LINE 512
+#define MAX_OTA_DATA 56
+// ITE
+#define ITE_EC_DATA_PORT    0x62
+#define ITE_EC_INDEX_PORT   0x66
+#define ITE_EC_CMD_PORT     0x66
+
+// EC RAM
+#define EC_CMD_READ_RAM     0x80    //Test for read CPUTemp
+#define EC_CMD_WRITE_RAM    0x81
+#define EC_CMD_QUERY        0x84
+// 固件升级器结构体
+typedef struct {
+    unsigned char sequence;
+    // 可以添加其他状态信息
+} FirmwareUpgrader;
+// CPU使用率计算结构体
+typedef struct {
+    unsigned long user;
+    unsigned long nice;
+    unsigned long system;
+    unsigned long idle;
+    unsigned long iowait;
+    unsigned long irq;
+    unsigned long softirq;
+} CPUData;
+
+typedef struct {
+    char name[128];
+    int temperature;          // 温度 (°C)
+    int utilization_gpu;      // GPU使用率 (%)
+    int utilization_memory;   // 显存使用率 (%)
+    long memory_used;         // 已用显存 (MB)
+    long memory_total;        // 总显存 (MB)
+    double power_draw;        // 功耗 (W)
+    int fan_speed;           // 风扇转速 (%)
+    char driver_version[32]; // 驱动版本
+} nvidia_gpu_info_t;
+#define MAX_INTERFACES 32
+#define MAX_IP_LENGTH 46  // IPv6地址最大长度
+// 网络接口信息结构体
+typedef struct {
+    char interface_name[32];
+    char ip_address[INET_ADDRSTRLEN];
+    char netmask[INET_ADDRSTRLEN];
+    char mac_address[18];
+    char status[16];
+    unsigned long long rx_bytes;
+    unsigned long long tx_bytes;
+    unsigned long long rx_bytes_prev;
+    unsigned long long tx_bytes_prev;
+    time_t last_update;
+    double rx_speed_kb;
+    double tx_speed_kb;
+    double rx_total_mb;
+    double tx_total_mb;
+    int initialized;  // 标记是否已初始化
+} network_interface_t;
+// 全局接口管理器
+typedef struct {
+    network_interface_t *interfaces;
+    int count;
+    int capacity;
+} interface_manager_t;
+static unsigned char COMMLEN = offsetof(Request, common_data.data) - offsetof(Request, length);
+void TimeSleep1Sec();
+int safe_usb_read(unsigned char* buffer, int length, int timeout_ms);
+void firmware_upgrader_init(FirmwareUpgrader* upgrader);
+int firmware_upgrade(FirmwareUpgrader* upgrader, 
+                     const char* firmware_path,
+                     unsigned char new_major, unsigned char new_minor,
+                     unsigned char new_patch, unsigned char new_build);
+int init_hidreport(Request *request, unsigned char cmd, unsigned char aim, unsigned char id);
+time_t get_local_timestamp();
+int get_tz_offset();
+int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char total,unsigned char order);
+void append_crc(Request *request);
+void appendEmpty_crc(Request *request);
+unsigned char cal_crc(unsigned char * data, int len);
+int get_cpu_temperature();
+int read_temperature_from_hwmon(void);
+int read_temperature_for_truenas(void);
+int read_temperature_via_truenas_api(void);
+void read_cpu_data(CPUData *data);
+float calculate_cpu_usage(const CPUData *prev, const CPUData *curr);
+int get_igpu_temperature();
+float get_igpu_usage();
+unsigned int get_memory_usage();
+int GetUserCount();
+
+int file_exists(const char *filename);
+int read_file(const char *filename, char *buffer, size_t buffer_size);
+//Disk
+// 硬盘池信息结构体
+#define MAX_POOLS 20
+#define MAX_DISKS_PER_POOL 20
+#define MAX_PATH 256
+#define MAX_OUTPUT 8192
+#define MAX_COMMAND 512  // 增加命令缓冲区大小
+
+// 结构体定义
+typedef struct {
+    char name[MAX_PATH];
+    char partuuid[MAX_PATH];
+    char device_path[MAX_PATH];
+    char disk_name[MAX_PATH];
+    int temperature;
+} DiskInfo;
+
+typedef struct {
+    char name[MAX_PATH];
+    unsigned long long total_size;
+    unsigned long long used_size;
+    unsigned long long free_size;
+    DiskInfo disks[MAX_DISKS_PER_POOL];
+    int disk_count;
+    int highest_temp;
+} PoolInfo;
+//Linux disk
+typedef struct {
+    char device[32];           // 设备名 (sda, nvme0n1等)
+    char model[128];           // 硬盘型号
+    char serial[64];           // 序列号
+    char mountpoint[MAX_PATH]; // 挂载点
+    unsigned long long total_size;    // 总容量 (bytes)
+    unsigned long long free_size;     // 可用容量 (bytes)
+    unsigned long long used_size;     // 已用容量 (bytes)
+    double usage_percent;      // 使用百分比
+    int temperature;           // 温度 (°C)
+    char type[16];             // 硬盘类型 (SATA/NVMe)
+} disk_info_t;
+disk_info_t disks[MAX_DISKS_PER_POOL];
+int disk_count = 0;
+int execute_command(const char* command, char* output, size_t output_size);
+void trim_string(char* str);
+int file_exists(const char* path);
+int read_file(const char* path, char* buffer, size_t buffer_size);
+char* extract_disk_name(const char* device_path);
+int is_valid_device_name(const char* name);
+int is_uuid_format(const char* str);
+unsigned long long parse_size(const char* size_str);
+
+int get_all_pools(PoolInfo* pools, int max_pools);
+int get_pool_info(PoolInfo* pool);
+int get_pool_disks_and_partuuids(PoolInfo* pool);
+char* find_device_by_partuuid(const char* partuuid);
+int get_disk_temperature(const char* disk_name);
+int update_pool_temperatures(PoolInfo* pool);
+void display_pool_info(const PoolInfo* pool);
+void check_and_update_pools();
+void rescan_all_pools();
+PoolInfo pools[MAX_POOLS];
+int pool_count;
+int disk_maxtemp = 0;
+void get_disk_identity(const char *device, char *model, char *serial);
+unsigned long long get_disk_size(const char *device);
+void get_mountpoint(const char *device, char *mountpoint);
+int get_mountpoint_usage(const char *mountpoint, unsigned long long *total, 
+                        unsigned long long *free, unsigned long long *used);
+int scan_disk_devices(disk_info_t *disks, int max_disks);
+int refresh_linux_disks(disk_info_t *disks, int count);
+//EC6266
+int acquire_io_permissions();
+static void read_cpu_ec_telemetry(unsigned char *temperature, unsigned char *rpm);
+void release_io_permissions();
+int ec_wait_ready();
+void ec_write_index(unsigned char index);
+void ec_write_data(unsigned char data);
+unsigned char ec_read_data();
+int ec_ram_read_byte(unsigned char address, unsigned char *value);
+int ec_ram_write_byte(unsigned char address, unsigned char value);
+static int guarded_ec_write_byte(unsigned char address, unsigned char value);
+int ec_ram_read_block(unsigned char start_addr, unsigned char *buffer, int length);
+int ec_ram_write_block(unsigned char start_addr, unsigned char *data, int length);
+int ec_query_version(char *version, int max_len);
+void nvidia_print_info();
+//异步HID
+void signal_handler(int sig);
+void close_usb_device(void);
+void* usb_read_thread(void *arg);
+int safe_usb_read_timeout(unsigned char *data, int length, int *actual_length, unsigned int timeout_ms);
+int usb_bulk_transfer_with_retry(libusb_device_handle *handle, 
+                                 unsigned char endpoint, 
+                                 unsigned char *data, 
+                                 int length, 
+                                 int *transferred, 
+                                 unsigned int timeout,
+                                 int max_retries);
+int start_usb_read_thread();
+void stop_usb_read_thread();
+int safe_usb_write(unsigned char *data, int length);
+void* usb_send_thread(void* arg);
+void systemoperation(unsigned char time,unsigned char cmd);
+//WLAN
+static interface_manager_t g_iface_manager = {0};
+network_interface_t *ifaces;
+int init_network_monitor();
+void display_interface_info(const char *ifname);
+int register_interface(const char *ifname);
+void monitor_all_interfaces();
+int register_all_physical_interfaces();
+int get_interface_basic_info(const char *ifname, 
+                           char *status, 
+                           char *mac_addr,
+                           char *ip_addr,
+                           char *netmask);
+int get_interface_traffic_info(const char *ifname,
+                             double *rx_speed_kb,
+                             double *tx_speed_kb,
+                             double *rx_total_mb,
+                             double *tx_total_mb);
+int get_registered_interfaces(char interfaces[][32], int max_interfaces);
+void cleanup_network_monitor();
+
+
+bool IsNvidiaGPU;
+char PageIndex = 0;
+
+//1Hour Count
+int HourTimeDiv = 0;
+static volatile sig_atomic_t running = 1;
+pthread_t read_thread,send_thread;
+// 互斥锁（用于线程安全）
+pthread_mutex_t usb_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t hour_time_mutex = PTHREAD_MUTEX_INITIALIZER;
+struct utmp *ut;
+//Discrete GPU
+typedef struct {
+    unsigned int index;
+    char name[64];
+    nvmlTemperatureSensors_t temp_sensor;
+    unsigned int temperature;
+    unsigned int utilization;
+    unsigned int memory_used;
+    unsigned int memory_total;
+    unsigned int power_usage;
+    unsigned int fan_speed;
+} gpu_info_t;
+int nvidia_smi_available();
+int nvidia_get_gpu_temperature();
+int nvidia_get_gpu_utilization();
+int nvidia_get_gpu_fan_speed();
+typedef struct {
+    char devicename[64];
+    char cpuname[128];
+    char operatename[128];
+    char serial_number[64];
+} system_info_t;
+void get_system_info(system_info_t *info);
+
+
+
+
+
+unsigned char DGPUtemp = 0;
+
+int cpusuage,cpufan,memoryusage;
+bool Isinitial = false;
+unsigned char cputemp = 0;
+unsigned char buffer[MAXLEN] = {0};
+unsigned char ack[MAXLEN] = {0};
+system_info_t sys_info;
+Request request;
+CPUData prev_data, curr_data;
+unsigned char Ver[4] = {0,0,0,0};
+int OTASendCnt = 0,OTAReceiveCnt = 0;
+bool OTAContinue = true;
+unsigned char OTAFile[]={0xFF,0xCC};
+static libusb_device_handle *handle = NULL;
+static libusb_context *usb_context = NULL;
+bool OTAEnable = false;
+
+/* Unraid port policy: safe by default. Enable writes only after validation. */
+static bool allow_ec_writes = false;
+static bool allow_ota = false;
+static bool allow_suspend = false;
+static bool enable_storage = false;
+static bool ec_write_notice = false;
+/* Linux I/O permissions belong to the calling thread. */
+static _Thread_local bool ec_io_ready = false;
+
+static bool env_enabled(const char *name) {
+    const char *value = getenv(name);
+    return value != NULL && (strcmp(value, "1") == 0 ||
+                             strcmp(value, "true") == 0 ||
+                             strcmp(value, "yes") == 0);
+}
+
+static void load_runtime_policy(void) {
+    allow_ec_writes = env_enabled("HARBOR_SUBSCREEN_ALLOW_EC_WRITE");
+    /* OTA also needs the EC panel power cycle, so never allow it alone. */
+    allow_ota = allow_ec_writes && env_enabled("HARBOR_SUBSCREEN_ALLOW_OTA");
+    allow_suspend = env_enabled("HARBOR_SUBSCREEN_ALLOW_SUSPEND");
+    enable_storage = env_enabled("HARBOR_SUBSCREEN_ENABLE_STORAGE");
+    printf("Runtime policy: ec-write=%s ota=%s suspend=%s storage=%s\n",
+           allow_ec_writes ? "on" : "off",
+           allow_ota ? "on" : "off",
+           allow_suspend ? "on" : "off",
+           enable_storage ? "on" : "off");
+}
+
+ 
+int initialUSB()
+{
+    int retry_count;
+    int res;
+    
+    // 初始化libusb
+    res = libusb_init(&usb_context);
+    if (res < 0) {
+        fprintf(stderr, "Failed to initialize libusb: %s\n", libusb_error_name(res));
+        return -1;
+    }
+    
+    for (retry_count = 0; retry_count < 3; retry_count++) {
+        #if DebugToken
+        printf("Attempting to open USB device %04x:%04x... (Attempt %d/%d)\n", 
+               VENDORID, PRODUCTID, retry_count + 1, 3);
+        #endif
+        
+        // 使用libusb_open_device_with_vid_pid打开设备
+        handle = libusb_open_device_with_vid_pid(usb_context, VENDORID, PRODUCTID);
+        
+        if (handle != NULL) {
+            #if DebugToken
+            printf("USB device opened successfully\n");
+            
+            // 获取设备描述符信息
+            struct libusb_device_descriptor desc;
+            libusb_device *dev = libusb_get_device(handle);
+            libusb_get_device_descriptor(dev, &desc);
+            
+            printf("Device information:\n");
+            printf("  VID: 0x%04x\n", desc.idVendor);
+            printf("  PID: 0x%04x\n", desc.idProduct);
+            printf("  bcdDevice: 0x%04x\n", desc.bcdDevice);
+            #endif
+            
+            // 如果设备是HID设备，你可能需要声明接口
+            // 这通常需要root权限或正确的udev规则
+            res = libusb_kernel_driver_active(handle, 0);
+            if (res == 1) {
+                printf("Kernel driver active, detaching...\n");
+                libusb_detach_kernel_driver(handle, 0);
+            }
+            
+            // 声明接口
+            res = libusb_claim_interface(handle, 0);
+            if (res < 0) {
+                printf("Failed to claim interface: %s\n", libusb_error_name(res));
+                libusb_close(handle);
+                handle = NULL;
+            } else {
+                printf("Interface claimed successfully\n");
+                break;
+            }
+        }
+        
+        if (handle == NULL) {
+            printf("ERROR: Failed to open device %04x:%04x\n", VENDORID, PRODUCTID);
+            printf("Available USB devices:\n");
+            printf("----------------------------\n");
+            
+            // 枚举所有USB设备
+            libusb_device **list;
+            ssize_t cnt = libusb_get_device_list(usb_context, &list);
+            
+            if (cnt < 0) {
+                printf("Failed to get device list\n");
+            } else {
+                for (ssize_t i = 0; i < cnt; i++) {
+                    libusb_device *device = list[i];
+                    struct libusb_device_descriptor desc;
+                    
+                    res = libusb_get_device_descriptor(device, &desc);
+                    if (res < 0) continue;
+                    
+                    printf("Device Found:\n");
+                    printf("  VID: 0x%04x\n", desc.idVendor);
+                    printf("  PID: 0x%04x\n", desc.idProduct);
+                    
+                    // 尝试打开设备获取更多信息
+                    libusb_device_handle *temp_handle;
+                    if (libusb_open(device, &temp_handle) == 0) {
+                        unsigned char str[256];
+                        
+                        if (desc.iManufacturer) {
+                            res = libusb_get_string_descriptor_ascii(temp_handle, 
+                                                                    desc.iManufacturer, 
+                                                                    str, sizeof(str));
+                            if (res > 0) printf("  Manufacturer: %s\n", str);
+                        }
+                        
+                        if (desc.iProduct) {
+                            res = libusb_get_string_descriptor_ascii(temp_handle, 
+                                                                    desc.iProduct, 
+                                                                    str, sizeof(str));
+                            if (res > 0) printf("  Product: %s\n", str);
+                        }
+                        
+                        libusb_close(temp_handle);
+                    }
+                    
+                    printf("  Bus: %03d, Address: %03d\n", 
+                           libusb_get_bus_number(device),
+                           libusb_get_device_address(device));
+                    printf("\n");
+                }
+                
+                libusb_free_device_list(list, 1);
+            }
+            
+            printf("----------------------------\n");
+        }
+        
+        if (handle == NULL) {
+            printf("Device open failed, retrying in 3 seconds...\n");
+            sleep(3);
+        }
+    }
+    
+    if (handle == NULL) {
+        printf("ERROR: Failed to open device %04x:%04x after %d attempts\n", 
+               VENDORID, PRODUCTID, 3);
+    } else {
+        printf("Device successfully opened and ready for communication\n"); 
+    }
+    if (handle == NULL) {
+        return -1;
+    }
+    // 清除端点halt状态
+    libusb_clear_halt(handle, EP_OUT);
+    libusb_clear_halt(handle, EP_IN);
+    return 0;
+
+
+    // if (start_usb_read_thread() != 0) {
+    //     printf("Failed to start USB read thread\n");
+    // } else {
+    //     printf("USB read thread started successfully\n");
+    // }
+}
+// 在主函数发送数据前，先测试读取
+int main() {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    signal(SIGINT, signal_handler);
+    signal(SIGTERM, signal_handler);
+    load_runtime_policy();
+
+    //initial USB first
+    if(initialUSB() == -1)
+        return -1;
+
+    //OTA first
+    int otapage;
+    otapage = init_hidreport(&request, SET, TIME_AIM, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, otapage);
+    if (safe_usb_write(buffer, otapage)  < 0) {
+        printf("Failed to write Time data\n");
+    }
+    unsigned char response[64];
+    int read_len = safe_usb_read(response, 64, 1500);
+    if (read_len > 0) {
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);  // 打印16进制数据
+        }
+        printf("\n");
+    }
+    memset(response,0x0,64);
+    // 休眠1秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 10; i++) {
+        usleep(100000); // 100ms
+    }
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+
+
+
+    otapage = first_init_hidreport(&request, GET, GetVer_AIM, 255, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, otapage);
+    if (safe_usb_write(buffer, otapage) == -1) {
+        printf("Failed to write otapage data\n");
+    }
+    read_len = safe_usb_read(response, 64, 1500);
+    if (read_len > 0) {
+        Ver[0] = response[5];
+        Ver[1] = response[6];
+        Ver[2] = response[7];
+        Ver[3] = response[8];
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);  // 打印16进制数据
+        }
+        printf("\n");
+    }
+    memset(response,0x0,64);
+    // 休眠1秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 10; i++) {
+        usleep(100000); // 100ms
+    }
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+
+    printf("\n");
+    otapage = first_init_hidreport(&request, GET, GetVer_AIM, 255, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, otapage);
+    if (safe_usb_write(buffer, otapage) == -1) {
+        printf("Failed to write otapage data\n");
+    }
+    read_len = safe_usb_read(response, 64, 1500);
+    if (read_len > 0) {
+        Ver[0] = response[5];
+        Ver[1] = response[6];
+        Ver[2] = response[7];
+        Ver[3] = response[8];
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);  // 打印16进制数据
+        }
+        printf("\n");
+    }
+     memset(response,0x0,64);
+    // 休眠5秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 10; i++) {
+        usleep(100000); // 100ms
+    }
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+
+
+    FirmwareUpgrader upgrader;
+    firmware_upgrader_init(&upgrader);
+    int result = -1;
+    // Unraid safety policy: firmware OTA is opt-in, never implicit.
+    if (allow_ota) {
+        const char *firmware_path = getenv("HARBOR_SUBSCREEN_FIRMWARE");
+        if (firmware_path == NULL || firmware_path[0] == '\0') {
+            firmware_path = FIRMWARE_PATH;
+        }
+        result = firmware_upgrade(&upgrader, firmware_path, 0, 3, 1, 0);
+    } else {
+        printf("Firmware OTA disabled by runtime policy\n");
+        result = 0;
+    }
+    
+    if (result == 0) {
+        printf("No need Update!!\n");
+    } 
+    else if(result == 1)
+    {
+        printf("Update Success!!\n");
+        sleep(1);
+        printf("Wait panel restart 15S!!\n");
+        sleep(15);
+        // 获取 I/O 权限
+        acquire_io_permissions();
+        guarded_ec_write_byte(0x59,0);//Cut Panel Power
+        // 释放 I/O 权限
+        release_io_permissions();
+        printf("Start Cut Panel Power 3S!!\n");
+        sleep(1);
+        printf("Cut Panel Power 2S!!\n");
+        sleep(1);
+        printf("Cut Panel Power 1S!!\n");
+        sleep(1);
+        printf("Enable Panel Power!!\n");
+        // 获取 I/O 权限
+        acquire_io_permissions();
+        guarded_ec_write_byte(0x59,1);//Enable Panel Power
+        // 释放 I/O 权限
+        release_io_permissions();
+        printf("Re connect Panel!!\n");
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        sleep(1);
+        initialUSB();
+        
+    }
+    else
+    {
+        printf("Update Fail!!\n");
+    }
+    OTAEnable = false;
+    if (start_usb_read_thread() != 0) {
+        printf("Failed to start USB read thread\n");
+        close_usb_device();
+        return 1;
+    } else {
+        printf("USB read thread started successfully\n");
+    }
+    IsNvidiaGPU = nvidia_smi_available();
+    // 扫描所有物理网络接口
+    if (init_network_monitor() < 0) {
+        printf("No WLAN Port!\n");
+        return -1;
+    }
+    // 注册所有物理接口
+    int registered = register_all_physical_interfaces();
+    monitor_all_interfaces();
+    printf("\n=== Network Interface Information ===\n");
+    if (g_iface_manager.count > 0 && g_iface_manager.interfaces != NULL) {
+        for (int i = 0; i < g_iface_manager.count; i++) {
+            printf("\n[INFO] Displaying interface %d/%d\n", i+1, g_iface_manager.count);
+            
+            // 检查接口名是否有效
+            if (g_iface_manager.interfaces[i].interface_name[0] != '\0') {
+                display_interface_info(g_iface_manager.interfaces[i].interface_name);
+            } else {
+                printf("[WARN] Interface %d has empty name\n", i+1);
+            }
+        }
+    } else {
+        printf("[INFO] No network interfaces registered or available\n");
+    }
+
+    if (enable_storage) {
+        // 扫描硬盘设备
+        pool_count = get_all_pools(pools, MAX_POOLS);
+
+        if (pool_count == 0) {
+            printf("No storage pools found in the system.\n");
+            printf("Please check if ZFS is properly configured.\n");
+            //如果不是ZFS就尝试直接读磁盘信息
+            disk_count = scan_disk_devices(disks, 10);
+            if (disk_count <= 0) {
+                printf("Can not find disks\n");
+            }
+        }
+        printf("Found %d storage pool(s):\n", pool_count);
+        for (int i = 0; i < pool_count; i++) {
+            printf("  %d. %s\n", i + 1, pools[i].name);
+        }
+        for (int i = 0; i < pool_count; i++) {
+            printf("Processing pool: %s\n", pools[i].name);
+            printf("%s\n", "--------------------------------------");
+
+            // 2.1 获取池的基本信息
+            if (get_pool_info(&pools[i]) != 0) {
+                printf("Failed to get basic information for pool %s\n", pools[i].name);
+                continue;
+            }
+
+            // 2.2 获取池中所有磁盘及其 PARTUUID
+            int disk_count = get_pool_disks_and_partuuids(&pools[i]);
+            if (disk_count == 0) {
+                printf("No valid disks found in pool %s\n", pools[i].name);
+                continue;
+            }
+
+            printf("Found %d disk(s) in pool %s\n", disk_count, pools[i].name);
+
+            // 2.3 更新每个磁盘的温度信息
+            if (update_pool_temperatures(&pools[i]) == 0) {
+                printf("Warning: Failed to get temperature information for some disks\n");
+            }
+
+            // 2.4 显示池的详细信息
+            display_pool_info(&pools[i]);
+
+            printf("\n");
+        }
+        for (int i = 0; i < pool_count; i++)
+        {
+            short Tttotal,Uuused;
+            Tttotal = pools[i].total_size;
+            Uuused = pools[i].used_size;
+            printf("Total size:%d,Used size:%d\n",Tttotal,Uuused);
+        }
+
+
+    } else {
+        pool_count = 0;
+        disk_count = 0;
+        printf("Storage scan disabled by runtime policy\n");
+    }
+    //DiskPage
+    #if DebugToken
+    printf("-----------------------------------DiskPage initial start-----------------------------------\n");
+    #endif
+    int diskforcount = 0;
+    if(pool_count != 0)
+    {
+        if(pool_count % 2 == 0)
+            diskforcount = pool_count / 2;
+        else
+            diskforcount = pool_count / 2 + 1;
+    }
+    else
+    {
+        if(disk_count % 2 == 0)
+            diskforcount = disk_count / 2;
+        else
+            diskforcount = disk_count / 2 + 1;
+    }
+    int diskpage;
+    for (int i = 0; i < diskforcount; i++) {
+        diskpage = first_init_hidreport(&request, SET, DiskPage_AIM, diskforcount, (i + 1));
+        append_crc(&request);
+        memcpy(buffer, &request, diskpage);
+        #if DebugToken
+        printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
+        printf("Diskpage Head: %x\n",request.header);
+        printf("sequence %d\n",request.sequence);
+        printf("lenth %d\n",request.length);
+        printf("cmd %d\n",request.cmd);
+        printf("aim %d\n",request.aim);
+        printf("order %d\n",request.DiskPage_data.order);
+        printf("total: %d\n \n",request.DiskPage_data.total);
+        printf("diskcount %d\n",request.DiskPage_data.diskcount);
+        printf("count: %d\n",request.DiskPage_data.count);
+        printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[0].disklength);
+        printf("Diskid: %d\n",request.DiskPage_data.diskStruct[0].disk_id);
+        printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[0].unit);
+        printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[0].total_size);
+        printf("Diskused: %d\n",request.DiskPage_data.diskStruct[0].used_size);
+        printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[0].temp);
+        printf("Diskname: %s\n",request.DiskPage_data.diskStruct[0].name);
+        if(pool_count-(i*2)>1)
+        {
+            printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[1].disklength);
+            printf("Diskid: %d\n",request.DiskPage_data.diskStruct[1].disk_id);
+            printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[1].unit);
+            printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[1].total_size);
+            printf("Diskused: %d\n",request.DiskPage_data.diskStruct[1].used_size);
+            printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[1].temp);
+            printf("Diskname: %s\n",request.DiskPage_data.diskStruct[1].name);
+        }
+        printf("CRC:%d\n",request.DiskPage_data.crc);
+        printf("Send %d time\n",(i+1));
+        #endif
+        if (safe_usb_write(buffer, diskpage)  < 0) {
+           printf("Failed to write DiskPage data\n");
+           break;
+        }
+        sleep(1);
+        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+        memset(&request, 0x0, sizeof(Request));
+    }
+    #if DebugToken
+    printf("-----------------------------------DiskPage initial end-----------------------------------\n");
+    #endif
+    printf("User Count :%d\n",GetUserCount());
+    
+    // 显示所有存储池信息
+        // if (volume_count == 0) {
+        //     printf("No non-system ZFS volumes found.\n");
+        // } else {
+        //     printf("Found %d ZFS volumes:\n", volume_count);
+        //     printf("===============================================================\n");
+            
+        //     /* 显示结果 */
+        //     for (int i = 0; i < volume_count; i++) {
+        //         printf("Volume %d:\n", i + 1);
+        //         printf("  Name: %s\n", volumes[i].vol_name);
+        //         printf("  Full Path: %s\n", volumes[i].full_name);
+        //         printf("  Parent Pool: %s\n", volumes[i].parent_pool);
+        //         printf("  Total Capacity: %.2f GB\n", volumes[i].total_gb);
+        //         printf("  Used Capacity: %.2f GB\n", volumes[i].used_gb);
+        //         printf("  Available: %.2f GB\n", volumes[i].avail_gb);
+        //         printf("  Disk IDs: %s\n", volumes[i].disk_ids);
+        //         printf("  Disk UUIDs: %s\n", volumes[i].disk_uuids);
+        //         printf("  ------------------------------------------\n");
+        //     }
+        // }
+    //HomePage
+    #if DebugToken
+    printf("-----------------------------------HomePage initial start-----------------------------------\n");
+    #endif
+    int homepage = init_hidreport(&request, SET, TIME_AIM, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, homepage);
+    if (safe_usb_write(buffer, homepage)  < 0) {
+        printf("Failed to write HomePage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+    #if DebugToken
+    printf("-----------------------------------HomePage initial end-----------------------------------\n");
+    #endif
+    //SystemPage
+    #if DebugToken
+    printf("-----------------------------------SystemPage initial start-----------------------------------\n");
+    #endif
+    int systempage1 = first_init_hidreport(&request, SET, SystemPage_AIM, 2, 1);
+    append_crc(&request);
+    memcpy(buffer, &request, systempage1);
+    if (safe_usb_write(buffer, systempage1) == -1) {
+        printf("Failed to write SystemPage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+    #if DebugToken
+    printf("-----------------------------------SystemPage initial second-----------------------------------\n");
+    #endif
+    int systempage2 = first_init_hidreport(&request, SET, SystemPage_AIM, 2, 2);
+    append_crc(&request);
+    memcpy(buffer, &request, systempage2);
+    if (safe_usb_write(buffer, systempage2) == -1) {
+        printf("Failed to write SystemPage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+    #if DebugToken
+    printf("-----------------------------------SystemPage initial end-----------------------------------\n");
+    #endif
+
+    //ModePage
+    #if DebugToken
+    printf("-----------------------------------ModePage initial start-----------------------------------\n");
+    #endif
+    int modepage = first_init_hidreport(&request, SET, ModePage_AIM, 255, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, modepage);
+    if (safe_usb_write(buffer, modepage)  < 0) {
+        printf("Failed to write ModePage data\n");
+    }
+    #if DebugToken
+    printf("-----------------------------------ModePage initial end-----------------------------------\n");
+    #endif
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+    //WLANPage
+    #if DebugToken
+    printf("-----------------------------------WLANPage initial start-----------------------------------\n");
+    #endif
+    int wlanpage;
+    for (int i = 0; i < g_iface_manager.count; i++)
+    {
+        wlanpage = first_init_hidreport(&request, SET, WlanPage_AIM, g_iface_manager.count, i + 1);
+        append_crc(&request);
+        memcpy(buffer, &request, wlanpage);
+        if (safe_usb_write(buffer, wlanpage)  < 0) {
+            printf("Failed to write WlanPage data\n");
+        }
+        sleep(1);
+        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+        /* code */
+    }
+    #if DebugToken
+    printf("-----------------------------------WLANPage initial end-----------------------------------\n");
+    #endif
+    get_system_info(&sys_info);
+    #if DebugToken
+    printf("-----------------------------------InfoPage initial start-----------------------------------\n");
+    #endif
+    int infopage;
+    infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 1);
+    append_crc(&request);
+    memcpy(buffer, &request, infopage);
+    if (safe_usb_write(buffer, infopage)  < 0) {
+        printf("Failed to write InfoPage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+    infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 2);
+    append_crc(&request);
+    memcpy(buffer, &request, infopage);
+    if (safe_usb_write(buffer, infopage)  < 0) {
+        printf("Failed to write InfoPage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+    infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 3);
+    append_crc(&request);
+    memcpy(buffer, &request, infopage);
+    if (safe_usb_write(buffer, infopage)  < 0) {
+        printf("Failed to write InfoPage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+    infopage = first_init_hidreport(&request, SET, InfoPage_AIM, 4, 4);
+    append_crc(&request);
+    memcpy(buffer, &request, infopage);
+    if (safe_usb_write(buffer, infopage)  < 0) {
+        printf("Failed to write InfoPage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+    #if DebugToken
+    printf("-----------------------------------InfoPage initial end-----------------------------------\n");
+    #endif
+
+    otapage = first_init_hidreport(&request, GET, GetVer_AIM, 255, 255);
+    append_crc(&request);
+    memcpy(buffer, &request, otapage);
+    if (safe_usb_write(buffer, otapage) == -1) {
+        printf("Failed to write otapage data\n");
+    }
+    sleep(1);
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+    // 创建读取线程
+    #if !IfNoPanel
+    if (pthread_create(&send_thread, NULL, usb_send_thread, handle) != 0) {
+        printf("Failed to create send thread\n");
+        running = 0;
+        pthread_join(read_thread, NULL);
+        close_usb_device();
+        return -1;
+    }
+    #endif
+    while (running) {
+
+        usleep(100000); // 100ms
+    }
+    // 清理资源
+    if (read_thread) {
+        pthread_join(read_thread, NULL);
+    }
+    if (send_thread) {
+        pthread_join(send_thread, NULL);
+    }
+    
+    close_usb_device();
+    return 0;
+}
+
+// 关闭USB设备
+void close_usb_device() {
+    if (handle != NULL) {
+        // 释放接口
+        libusb_release_interface(handle, INTERFACE);
+        
+        // 重新附加内核驱动（如果之前分离了）
+        if (libusb_kernel_driver_active(handle, INTERFACE) == 0) {
+            libusb_attach_kernel_driver(handle, INTERFACE);
+        }
+        
+        // 关闭设备
+        libusb_close(handle);
+        handle = NULL;
+    }
+    
+    if (usb_context != NULL) {
+        libusb_exit(usb_context);
+        usb_context = NULL;
+    }
+    
+    printf("USB device closed\n");
+}
+void TimeSleep1Sec()
+{
+    pthread_mutex_lock(&hour_time_mutex);
+    if(HourTimeDiv == 3061)
+        HourTimeDiv = 0;
+    HourTimeDiv ++;
+    pthread_mutex_unlock(&hour_time_mutex);
+    printf("Time:%ld\n",get_local_timestamp() + get_tz_offset());
+    // 休眠1秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 10 && running; i++) {
+        usleep(100000); // 100ms
+    }
+}
+// 初始化固件升级器
+void firmware_upgrader_init(FirmwareUpgrader* upgrader) {
+    upgrader->sequence = 0;
+}
+// 获取下一个序列号
+unsigned char get_next_sequence(FirmwareUpgrader* upgrader) {
+    upgrader->sequence = (upgrader->sequence + 1) & 0xFF;
+    return upgrader->sequence;
+}
+
+// 封装读取函数，兼容之前的接口
+int safe_usb_read(unsigned char* buffer, int length, int timeout_ms) {
+    int actual_length = 0;
+    int result = safe_usb_read_timeout(buffer, length, &actual_length, timeout_ms);
+    
+    if (result == LIBUSB_SUCCESS) {
+        return actual_length;  // 返回实际读取的字节数
+    } else {
+        return -1;  // 返回错误
+    }
+}
+
+// 发送固件数据
+int send_firmware_data(FirmwareUpgrader* upgrader, 
+                       const unsigned char* firmware, 
+                       uint32_t total_size,
+                       void (*progress_callback)(int, int)) {
+    uint32_t sent_size = 0;
+    unsigned char chunk[57];
+    unsigned char buffer[64];
+    unsigned char response[64];
+    unsigned char response_data[56];
+    int data_len = 0;
+    int error_code = 0;
+    
+    // 每个数据包的数据部分最大长度
+    int chunk_size = 57 - 1;  // 约57字节
+    
+    printf("\n[MSG] start to transfer fw, Total: %u bytes\n", total_size);
+    printf("MSG] Data per pacakge: %d bytes, 预计 %d 包\n", 
+           chunk_size, (total_size + chunk_size - 1) / chunk_size);
+    
+    time_t start_time = time(NULL);
+    int last_print_progress = -10;
+    
+    while (sent_size < total_size) {
+        // 计算本次发送的数据量
+        uint32_t remaining = total_size - sent_size;
+        int send_len = (remaining < chunk_size) ? remaining : chunk_size;
+        
+        // === 动态计算包大小 ===
+        int data_len = COMMLEN + send_len + 1;
+        int packet_len = 6 + send_len + 1;
+        unsigned char* packet = (unsigned char*)malloc(packet_len);
+        if (!packet) {
+            printf("\n[Error] memory malloc fail\n");
+            return -1;
+        }
+        
+        // 填充包头
+        packet[0] = 0xA5;
+        packet[1] = 0x5A;
+        packet[2] = get_next_sequence(upgrader);
+        packet[3] = data_len;      
+        packet[4] = UPDATE;           
+        packet[5] = Updatefw_AIM;
+        // 复制数据
+        memcpy(packet + 6, firmware + sent_size, send_len);
+        // 计算CRC（从开头到数据末尾）
+        unsigned short crc_sum = 0;
+        for (int i = 0; i < packet_len - 1; i++) {
+            crc_sum += packet[i];
+            printf("%02X ", packet[i]);
+        }
+        packet[packet_len - 1] = (unsigned char)(crc_sum & 0xFF);  // CRC放在最后
+        // 调试输出
+        printf("\n[包%d] seq=%d, data=%d, packet=%d, crc=0x%02X\n", 
+               sent_size / chunk_size + 1,
+               packet[2], send_len, packet_len, packet[packet_len - 1]);
+        // 发送请求
+        if (safe_usb_write(packet, packet_len) < 0) {
+            printf("\n[错误] 发送固件数据失败\n");
+            free(packet);
+            return -1;
+        }
+        free(packet);
+
+        // 等待设备响应
+        int read_len = safe_usb_read(response, 64, 1500);
+        if (read_len > 0) {
+            if (response[5]) {
+                    // != 0 Fail
+                printf(">>> Received %d bytes:\n", read_len);
+                for (int i = 0; i < read_len; i++) {
+                    printf("%02X ", response[i]);  // 打印16进制数据
+                }
+                printf("\n");
+                printf("Failed to send OTA data,:%d\n",response[5]);
+                return -1;
+            } else {
+                printf(">>> Received %d bytes:\n", read_len);
+                for (int i = 0; i < read_len; i++) {
+                    printf("%02X ", response[i]);  // 打印16进制数据
+                }
+                printf("\n");
+                printf(">>>Success to send data\n" );
+            }
+        }
+        else
+        {
+            printf("Failed to send OTA data\n");
+                return -1;
+        }
+        sent_size += send_len;
+        
+        // 计算和显示进度
+        int progress = (sent_size * 100) / total_size;
+        if (progress >= last_print_progress + 1) {
+            time_t elapsed = time(NULL) - start_time;
+            double speed = (elapsed > 0) ? (double)sent_size / elapsed / 1024 : 0;
+            printf("\r[Send] %d%% (%u/%u) | %.1f KB/s   ", 
+                   progress, sent_size, total_size, speed);
+            fflush(stdout);
+            last_print_progress = progress;
+        }
+        
+        // 如果有进度回调函数，调用它
+        if (progress_callback) {
+            progress_callback(sent_size, total_size);
+        }
+    }
+
+    
+    // 打印100%进度
+    time_t elapsed = time(NULL) - start_time;
+    double speed = (elapsed > 0) ? (double)total_size / elapsed / 1024 : 0;
+    printf("\r[SEND] 100%% (%u/%u) | %.1f KB/s   \n", total_size, total_size, speed);
+    printf("\n[MSG] 传输完成! Use %lds, AVG speed %.1f KB/s\n", elapsed, speed);
+    
+    return 0;
+}
+// 发送完成信号
+int send_finish_signal(FirmwareUpgrader* upgrader) {
+    printf("\n[MSG] 发送完成信号...\n");
+    
+    Request request;
+    unsigned char buffer[64];
+    unsigned char response[64];
+    unsigned char response_data[56];
+    int data_len = 0;
+    int error_code = 0;
+    
+    // 构建空数据包请求
+    // 构建空数据包请求
+    int packet_len = first_init_hidreport(&request, UPDATE, Updatefw_AIM, 
+                                         0, 0);
+    appendEmpty_crc(&request);
+    
+    // 发送请求
+    memcpy(buffer, &request, packet_len);
+    if (safe_usb_write(buffer, packet_len) < 0) {
+        printf("[错误] 发送完成信号失败\n");
+        return -1;
+    }
+    
+    // 等待设备响应
+    int read_len = safe_usb_read(response, 64, 5000);
+    if (read_len > 0) {
+            if (response[5]) {
+                    // != 0 Fail
+                printf(">>> Received %d bytes:\n", read_len);
+                for (int i = 0; i < read_len; i++) {
+                    printf("%02X ", response[i]);  // 打印16进制数据
+                }
+                printf("\n");
+                printf("Failed to restart,:%d\n",response[5]);
+                return -1;
+            } else {
+                printf(">>>Success to restart\n" );
+            }
+    }
+    
+    printf("[MSG] 设备可能已重启\n");
+    return 0;
+}
+// 发送升级信息
+int send_upgrade_info(FirmwareUpgrader* upgrader, 
+                      unsigned char major, unsigned char minor, 
+                      unsigned char patch, unsigned char build, 
+                      uint32_t firmware_size) {
+    printf("\n[MSG] 发送升级信息: V%d.%d.%d.%d, 大小: %u bytes\n", 
+           build, major, minor, patch, firmware_size);
+    
+    unsigned char buffer[MAXLEN];
+    unsigned char response[MAXLEN];
+    unsigned char response_data[56];
+    int data_len = 0;
+    int error_code = 0;
+    
+    // 构建升级信息数据
+    memset(&request, 0, sizeof(Request));
+    request.header = SIGNATURE;
+    request.cmd = UPDATE;
+    request.aim = Updatefw_info_AIM;
+    request.sequence = 0;
+    
+    // 填充版本数据
+    request.UpgradeInfo_data.build = build;
+    request.UpgradeInfo_data.major = major;
+    request.UpgradeInfo_data.minor = minor;
+    request.UpgradeInfo_data.patch = patch;
+    request.UpgradeInfo_data.size = firmware_size;  // 小端序
+    
+    // 计算数据长度
+    request.length = COMMLEN + sizeof(request.UpgradeInfo_data);  // 不包括CRC
+    
+    // 计算并添加CRC
+    append_crc(&request);
+    
+    // 计算包长度
+    int packet_len = offsetof(Request, UpgradeInfo_data.crc) + 1;
+    printf("UpgrageInfo length:%d\n",packet_len);
+    // 发送请求
+    memcpy(buffer, &request, packet_len);
+    if (safe_usb_write(buffer, packet_len) < 0) {
+        printf("[错误] 发送升级信息失败\n");
+        return -1;
+    }
+    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+    int read_len = safe_usb_read(response, 64, 1500);
+    if (read_len > 0) {
+        for (int i = 0; i < read_len; i++) {
+            printf("%02X ", response[i]);  // 打印16进制数据
+        }
+        printf("\n");
+    }
+    // 休眠5秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 50 && running; i++) {
+        usleep(100000); // 100ms
+    }
+    // 读取响应
+    // if(OTAEnable == false)
+    // {
+    //     printf("[警告] 未收到有效响应...\n");
+    //     return -1;
+    // }
+
+    // int actual_length = 0;
+    // int read_len = safe_usb_read_timeout(response, sizeof(response), &actual_length, 3000);
+    // if (read_len <= 0) {
+    //     printf("[警告] 未收到有效响应，尝试继续...\n");
+    //     return 0;  // 没有响应也尝试继续
+    // }
+    
+    // 解析响应
+    // if (parse_response(response, read_len, response_data, &data_len, &error_code) == 0) {
+    //     if (data_len >= 1) {
+    //         if (error_code == 0) {
+    //             printf("[MSG] 设备允许升级\n");
+    //             return 0;  // 成功
+    //         } else if (error_code == 1) {
+    //             printf("[错误] 固件大小无效\n");
+    //         } else if (error_code == 2) {
+    //             printf("[错误] 版本号不允许 (新版本必须大于当前版本)\n");
+    //         } else {
+    //             printf("[错误] 设备拒绝升级, 错误码: %d\n", error_code);
+    //         }
+    //         return -1;
+    //     }
+    // }
+    return 0;
+}
+int firmware_upgrade(FirmwareUpgrader* upgrader, 
+                     const char* firmware_path,
+                     unsigned char new_build,unsigned char new_major,
+                     unsigned char new_minor,unsigned char new_patch) {
+
+    // 1. 读取固件文件
+    printf("Read fw:%s\n", firmware_path);
+    
+    FILE* file = fopen(firmware_path, "rb");
+    if (!file) {
+        printf("Can not open fw %s\n", firmware_path);
+        return -1;
+    }
+    
+    // 获取文件大小
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    printf("fw size: %ld bytes (%.2f KB)\n", 
+           file_size, (double)file_size / 1024);
+
+    // 检查固件大小 (最大960KB)
+    long max_size = 960 * 1024;
+    if (file_size > max_size) {
+        printf("fw can not over %ld bytes (%ld KB)\n", 
+               max_size, max_size / 1024);
+        fclose(file);
+        return -1;
+    }
+    // 读取固件数据
+    unsigned char* firmware = (unsigned char*)malloc(file_size);
+    if (!firmware) {
+        printf("fail to malloc memory\n");
+        fclose(file);
+        return -1;
+    }
+    size_t read_bytes = fread(firmware, 1, file_size, file);
+    fclose(file);
+    
+    if (read_bytes != file_size) {
+        printf("read fw fail\n");
+        free(firmware);
+        return -1;
+    }
+    // 休眠1秒，但分段休眠以便及时响应退出
+    for (int i = 0; i < 10 && running; i++) {
+        usleep(100000); // 100ms
+    }
+    if((Ver[0]!= 0) || (Ver[1]!= 0) || (Ver[2]!= 0) || (Ver[3]!= 0))
+    {
+        printf("Current Version: V%d.%d.%d.%d, New Version:V%d.%d.%d.%d\n",
+               Ver[0], Ver[1], Ver[2], Ver[3],
+               new_build, new_major, new_minor, new_patch);
+        int NVer,OVer;
+        OVer = Ver[0] * 1000 + Ver[1] * 100 + Ver[2] * 10 + Ver[3];
+        NVer = new_build * 1000 + new_major * 100 + new_minor * 10 + new_patch;
+        if(OVer >= NVer)
+        {
+            printf("No need to upgrade!\n");
+            return 0;
+        }
+    }
+    OTAEnable = true;
+    // 3. 发送升级信息
+    if (send_upgrade_info(upgrader, new_major, new_minor, new_patch, 
+                         new_build, (uint32_t)file_size) != 0) {
+        free(firmware);
+        return -1;
+    }
+    // 4. 发送固件数据
+    if (send_firmware_data(upgrader, firmware, (uint32_t)file_size, NULL) != 0) {
+        free(firmware);
+        return -1;
+    }
+    
+    // 5. 发送完成信号
+    if (send_finish_signal(upgrader) != 0) {
+        free(firmware);
+        return -1;
+    }
+    // 清理
+    free(firmware);
+    printf("\n============================================================\n");
+    printf("Update Success!\n");
+    printf("============================================================\n");
+    return 1;
+}
+time_t get_local_timestamp() {
+    time_t now = time(NULL);
+    struct tm *local = localtime(&now);
+    return mktime(local);
+}
+int get_tz_offset(void) {
+    time_t now = time(NULL);
+    struct tm local, gmt;
+    
+    localtime_r(&now, &local);  // 本地时间
+    gmtime_r(&now, &gmt);       // UTC 时间
+    
+    // 计算时差（秒）
+    int offset = (local.tm_hour - gmt.tm_hour) * 3600;
+    
+    // 处理分钟差异（有些时区有半小时或45分钟）
+    offset += (local.tm_min - gmt.tm_min) * 60;
+    
+    // 处理日期边界（跨日情况）
+    if (local.tm_yday != gmt.tm_yday) {
+        if (local.tm_yday > gmt.tm_yday)
+            offset += 86400;   // 本地比 UTC 快一天
+        else
+            offset -= 86400;   // 本地比 UTC 慢一天
+    }
+    
+    // 处理年份边界
+    if (local.tm_year != gmt.tm_year) {
+        if (local.tm_year > gmt.tm_year)
+            offset += 86400;
+        else
+            offset -= 86400;
+    }
+    
+    return offset;
+}
+int init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char id) {
+    request->header = SIGNATURE;
+    request->cmd = cmd;
+    request->aim = aim;
+    request->length = COMMLEN;
+    request->sequence = 0;
+    switch (aim)
+    {
+    case TIME_AIM:
+        request->length += sizeof(request->time_data);
+        request->time_data.time_info.timestamp = get_local_timestamp() + get_tz_offset();
+        return offsetof(Request, time_data.crc) + 1;
+    case System_AIM:
+        request->length += sizeof(request->system_data);
+        request->system_data.system_info.sys_id = id;
+        if(id == 0)
+        {
+            
+            // 读取当前CPU数据
+            read_cpu_data(&curr_data);
+            // 计算CPU使用率
+            //printf("CPU usage: %2f\n", calculate_cpu_usage(&prev_data, &curr_data));
+            request->system_data.system_info.usage = calculate_cpu_usage(&prev_data, &curr_data);
+            // 更新前一次的数据
+            prev_data = curr_data;
+            read_cpu_ec_telemetry(&request->system_data.system_info.temerature,
+                                  &request->system_data.system_info.rpm);
+        }
+        else if(id == 1)
+        {
+            request->system_data.system_info.usage = get_igpu_usage();
+            request->system_data.system_info.temerature = get_igpu_temperature();
+            read_cpu_ec_telemetry(NULL, &request->system_data.system_info.rpm);
+        }
+        else if(id == 2)
+        {
+            //memory
+            
+            request->system_data.system_info.usage = get_memory_usage();
+            request->system_data.system_info.temerature = 255;
+            request->system_data.system_info.rpm = 255;
+        }
+        else if (id == 3)
+        {
+            if(IsNvidiaGPU)
+            {
+                DGPUtemp = nvidia_get_gpu_temperature();
+                request->system_data.system_info.usage = nvidia_get_gpu_utilization();
+                request->system_data.system_info.temerature = DGPUtemp;
+                request->system_data.system_info.rpm = nvidia_get_gpu_fan_speed();
+            }
+        }
+        return offsetof(Request, system_data.crc) + 1;
+    case Disk_AIM:
+        if(pool_count)
+        {
+            //update pool information
+            get_pool_info(&pools[id]);
+            request->length += sizeof(request->disk_data);
+            request->disk_data.disk_info.disk_id = id;
+            request->disk_data.disk_info.unit = 0x22;
+            // ZvolInfo* zvol =&all_zvols->all_zvols[id];
+            request->disk_data.disk_info.total_size = pools[id].total_size;
+            request->disk_data.disk_info.used_size = pools[id].used_size;
+            if(request->disk_data.disk_info.total_size > 4000)
+            {
+                request->disk_data.disk_info.total_size /= 1024;
+                request->disk_data.disk_info.unit += 1;
+            }
+            if(request->disk_data.disk_info.used_size > 4000)
+            {
+                request->disk_data.disk_info.used_size /= 1024;
+                request->disk_data.disk_info.unit += 0x10;
+            }
+            request->disk_data.disk_info.temp = pools[id].highest_temp;
+        }
+        else
+        {
+            request->length += sizeof(request->disk_data);
+            request->disk_data.disk_info.disk_id = id;
+            request->disk_data.disk_info.unit = 0x22;
+            // ZvolInfo* zvol =&all_zvols->all_zvols[id];
+            request->disk_data.disk_info.total_size = disks[id].total_size;
+            request->disk_data.disk_info.used_size = disks[id].used_size;
+            if(request->disk_data.disk_info.total_size > 4000)
+            {
+                request->disk_data.disk_info.total_size /= 1024;
+                request->disk_data.disk_info.unit += 1;
+            }
+            if(request->disk_data.disk_info.used_size > 4000)
+            {
+                request->disk_data.disk_info.used_size /= 1024;
+                request->disk_data.disk_info.unit += 0x10;
+            }
+            request->disk_data.disk_info.temp = disks[id].temperature;
+        }
+        return offsetof(Request, disk_data.crc) + 1;
+    // case GPU_AIM:
+    //     request->length += sizeof(request->gpu_data);
+    //     // Code
+    //     unsigned char DGPUtemp = 0;
+    //     if(IsNvidiaGPU)
+    //     {
+    //         DGPUtemp = nvidia_get_gpu_temperature();
+    //         request->gpu_data.gpu_info.temperature = DGPUtemp;
+    //         request->gpu_data.gpu_info.usage = nvidia_get_gpu_utilization();
+    //         request->gpu_data.gpu_info.rpm = nvidia_get_gpu_fan_speed();
+
+    //     }
+    //     return offsetof(Request, gpu_data.crc) + 1;
+    // case CPU_AIM:
+        
+        // request->length += sizeof(request->cpu_data);
+        // // Code
+        // request->cpu_data.cpu_info.temerature = get_cpu_temperature();
+        // // 读取当前CPU数据
+        // read_cpu_data(&curr_data);
+        // // 计算CPU使用率
+        // //printf("CPU usage: %2f\n", calculate_cpu_usage(&prev_data, &curr_data));
+        // request->cpu_data.cpu_info.usage = calculate_cpu_usage(&prev_data, &curr_data);
+        // // 更新前一次的数据
+        // prev_data = curr_data;
+        // // 获取 I/O 权限
+        // acquire_io_permissions();
+        // unsigned char CPU_fan = 0;
+        // ec_ram_read_byte(0x70,&CPU_fan);
+        // request->cpu_data.cpu_info.rpm = CPU_fan;
+        // // 释放 I/O 权限
+        // release_io_permissions();
+        // return offsetof(Request, cpu_data.crc) + 1;
+    case USER_AIM:
+        request->length += sizeof(request->user_data);
+        // Code
+        request->user_data.user_info.online = GetUserCount();
+        return offsetof(Request, user_data.crc) + 1;
+    case WlanSpeed_AIM:
+        request->length += sizeof(request->speed_data);
+        request->speed_data.id = id;
+        double rx_speed = 0, tx_speed = 0, rx_total = 0, tx_total = 0;
+        //unit default use KB/S
+        request->speed_data.speed_info.unit = 0x00;
+        network_interface_t *get_iface = &g_iface_manager.interfaces[id];
+        if(get_interface_traffic_info(get_iface->interface_name, &rx_speed, &tx_speed, &rx_total, &tx_total) == 0)
+        {
+            printf("RX Speed:  %.2f KB/s\n", rx_speed);
+            printf("TX Speed:  %.2f KB/s\n", tx_speed);
+            printf("Total RX:  %.2f MB\n", rx_total);
+            printf("Total TX:  %.2f MB\n", tx_total);
+        }
+        if(tx_speed > 1024)
+        {
+            request->speed_data.speed_info.unit += 0x10;
+            tx_speed /= 1024;
+            if(tx_speed > 1024)
+            {
+                request->speed_data.speed_info.unit += 0x10;
+                tx_speed /= 1024;
+                if(tx_speed > 1024)
+                {
+                    request->speed_data.speed_info.unit += 0x10;
+                    tx_speed /= 1024;
+                }
+            }
+        }
+        if(rx_speed > 1024)
+        {
+            request->speed_data.speed_info.unit += 0x01;
+            rx_speed /= 1024;
+            if(rx_speed > 1024)
+            {
+                request->speed_data.speed_info.unit += 0x10;
+                rx_speed /= 1024;
+                if(rx_speed > 1024)
+                {
+                    request->speed_data.speed_info.unit += 0x10;
+                    rx_speed /= 1024;
+                }
+            }
+        }
+        
+        request->speed_data.speed_info.uploadspeed = tx_speed;
+        request->speed_data.speed_info.downloadspeed = rx_speed;
+
+        return offsetof(Request, speed_data.crc) + 1;
+    case WlanTotal_AIM:
+        request->length += sizeof(request->flow_data);
+        request->flow_data.id = id;
+        request->flow_data.unit = 0x00;
+        //double rx_speed = 0, tx_speed = 0, rx_total = 0, tx_total = 0,total = 0;
+        double total = 0;
+        //network_interface_t 
+
+        get_iface = &g_iface_manager.interfaces[id];
+        printf("Interface: %s\n", get_iface->interface_name);
+        if(get_interface_traffic_info(get_iface->interface_name, &rx_speed, &tx_speed, &rx_total, &tx_total) == 0)
+        {
+            printf("RX Speed:  %.2f KB/s\n", rx_speed);
+            printf("TX Speed:  %.2f KB/s\n", tx_speed);
+            printf("Total RX:  %.2f MB\n", rx_total);
+            printf("Total TX:  %.2f MB\n", tx_total);
+        }
+        total = tx_total + rx_total;
+        total *= 1024; //Change to KB
+        if(total > 1024)
+        {
+            request->flow_data.unit += 0x01;
+            total /= 1024;
+            if(total > 1024)
+            {
+                request->flow_data.unit += 0x01;
+                total /= 1024;
+                if(total > 1024)
+                {
+                    request->flow_data.unit += 0x01;
+                    total /= 1024;
+                }
+            }
+        }
+        request->flow_data.totalflow = total;
+        return offsetof(Request, flow_data.crc) + 1;
+    case WlanIP_AIM:
+        request->length += sizeof(request->wlanip_data);
+        request->wlanip_data.id = id;
+        char status[16], mac[18], ip[INET_ADDRSTRLEN], mask[INET_ADDRSTRLEN];
+        //network_interface_t 
+        get_iface = &g_iface_manager.interfaces[id];
+        printf("Interface: %s\n", get_iface->interface_name);
+        if(get_interface_basic_info(get_iface->interface_name,status, mac, ip, mask) == 0)
+        {
+            printf("Status:    %s\n", status);
+            printf("MAC:       %s\n", mac);
+            printf("IP:        %s\n", ip);
+            printf("Netmask:   %s\n", mask);
+        }
+        int a,b,c,d;
+        if (sscanf(ip, "%d.%d.%d.%d", &a, &b, &c, &d) == 4) 
+        {
+            request->wlanip_data.ip[0] = (unsigned char)a;
+            request->wlanip_data.ip[1] = (unsigned char)b;
+            request->wlanip_data.ip[2] = (unsigned char)c;
+            request->wlanip_data.ip[3] = (unsigned char)d;
+        }
+        return offsetof(Request, wlanip_data.crc) + 1;
+    default:
+        request->length += sizeof(request->common_data);
+        return offsetof(Request, common_data.crc) + 1;
+    }
+}
+
+int first_init_hidreport(Request* request, unsigned char cmd, unsigned char aim,unsigned char total,unsigned char order) {
+    request->header = SIGNATURE;
+    request->cmd = cmd;
+    request->aim = aim;
+    request->length = COMMLEN;
+
+    switch (aim)
+    {
+    case HomePage_AIM:
+        request->length += sizeof(request->Homepage_data);
+        request->Homepage_data.time_info.timestamp = get_local_timestamp() + get_tz_offset();
+        request->Homepage_data.total = total;
+        request->Homepage_data.order = order;
+        return offsetof(Request, Homepage_data.crc) + 1;
+    case SystemPage_AIM:
+        request->length += sizeof(request->SystemPage_data);
+        request->SystemPage_data.order = order;
+        request->SystemPage_data.total = total;
+        if(IsNvidiaGPU)
+            request->SystemPage_data.syscount = 4;
+        else
+            request->SystemPage_data.syscount = 3;
+        if(order == 1)
+        {
+            request->SystemPage_data.count = 2;
+            // 读取当前CPU数据
+            read_cpu_data(&curr_data);
+            request->SystemPage_data.systemPage[0].syslength = sizeof(request->SystemPage_data.systemPage[0]);
+            request->SystemPage_data.systemPage[0].sys_id = 0; 
+            request->SystemPage_data.systemPage[0].usage = calculate_cpu_usage(&prev_data, &curr_data);
+            // 更新前一次的数据
+            prev_data = curr_data;
+            read_cpu_ec_telemetry(&request->SystemPage_data.systemPage[0].temp,
+                                  &request->SystemPage_data.systemPage[0].rpm);
+            request->SystemPage_data.systemPage[0].name[0] = 'C';
+            request->SystemPage_data.systemPage[0].name[1] = 'P';
+            request->SystemPage_data.systemPage[0].name[2] = 'U';
+            //CPU OK
+            request->SystemPage_data.systemPage[1].syslength = sizeof(request->SystemPage_data.systemPage[1]);
+            request->SystemPage_data.systemPage[1].sys_id = 1;
+            //Todo
+            request->SystemPage_data.systemPage[1].usage = get_igpu_usage();;
+            request->SystemPage_data.systemPage[1].temp = get_igpu_temperature();
+            request->SystemPage_data.systemPage[1].rpm = request->SystemPage_data.systemPage[0].rpm;
+            request->SystemPage_data.systemPage[1].name[0] = 'i';
+            request->SystemPage_data.systemPage[1].name[1] = 'G';
+            request->SystemPage_data.systemPage[1].name[2] = 'P';
+            request->SystemPage_data.systemPage[1].name[3] = 'U';
+        }
+        else if(order == 2)
+        {
+            request->SystemPage_data.systemPage[0].syslength = sizeof(request->SystemPage_data.systemPage[0]);
+            request->SystemPage_data.systemPage[0].sys_id = 2;
+            request->SystemPage_data.systemPage[0].usage = get_memory_usage();
+            request->SystemPage_data.systemPage[0].temp = 255;//No temp
+            request->SystemPage_data.systemPage[0].rpm = 255;//No fan
+            request->SystemPage_data.systemPage[0].name[0] = 'M';
+            request->SystemPage_data.systemPage[0].name[1] = 'e';
+            request->SystemPage_data.systemPage[0].name[2] = 'm';
+            request->SystemPage_data.systemPage[0].name[3] = 'o';
+            request->SystemPage_data.systemPage[0].name[4] = 'r';
+            request->SystemPage_data.systemPage[0].name[5] = 'y';
+            if(IsNvidiaGPU)
+            {
+                request->SystemPage_data.count = 2;
+                request->SystemPage_data.systemPage[1].syslength = sizeof(request->SystemPage_data.systemPage[1]);
+                request->SystemPage_data.systemPage[1].sys_id = 3;
+                request->SystemPage_data.systemPage[1].usage = 0;
+                request->SystemPage_data.systemPage[1].temp = 0;//No temp
+                request->SystemPage_data.systemPage[1].rpm = 0;//No fan
+                request->SystemPage_data.systemPage[1].name[0] = 'D';
+                request->SystemPage_data.systemPage[1].name[1] = 'G';
+                request->SystemPage_data.systemPage[1].name[2] = 'P';
+                request->SystemPage_data.systemPage[1].name[3] = 'U';
+            }
+            else
+                request->SystemPage_data.count = 1;
+        }
+        return offsetof(Request, SystemPage_data.crc) + 1;
+    case DiskPage_AIM:
+        request->length += sizeof(request->DiskPage_data);
+        request->DiskPage_data.total = total;
+        request->DiskPage_data.order = order;
+        if(pool_count != 0)
+        {
+            request->DiskPage_data.diskcount = pool_count;
+            int pool_index = (order - 1) * 2;
+            if (order <= 0 || pool_index < 0 || pool_index >= pool_count) {
+                request->DiskPage_data.count = 0;
+                return offsetof(Request, DiskPage_data.crc) + 1;
+            }
+            if((pool_count - (order-1)*2) == 1)
+            {
+                request->DiskPage_data.count = 1;
+                request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
+                request->DiskPage_data.diskStruct[0].unit = 0x22;
+                request->DiskPage_data.diskStruct[0].reserve = 0;
+                request->DiskPage_data.diskStruct[0].total_size = pools[(order - 1) * 2].total_size;
+                request->DiskPage_data.diskStruct[0].used_size = pools[(order - 1) * 2].used_size;
+                if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
+                //reserve name
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[0].name[i] = pools[(order - 1) * 2].name[i];
+                }
+                request->DiskPage_data.diskStruct[0].name[sizeof(pools[(order - 1) * 2].name) + 1] = 0;
+                request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
+            }
+            else
+            {
+                //First
+                request->DiskPage_data.count = 2;
+                request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
+                request->DiskPage_data.diskStruct[0].unit = 0x22;
+                request->DiskPage_data.diskStruct[0].reserve = 0;
+                request->DiskPage_data.diskStruct[0].total_size = pools[(order - 1) * 2].total_size;
+                request->DiskPage_data.diskStruct[0].used_size = pools[(order - 1) * 2].used_size;
+                if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[0].temp = pools[(order - 1) * 2].highest_temp;
+                //reserve name
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[0].name[i] = pools[(order - 1) * 2].name[i];
+                }
+                request->DiskPage_data.diskStruct[0].name[sizeof(pools[(order - 1) * 2].name) + 1] = 0;
+                request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
+                //Second
+                request->DiskPage_data.diskStruct[1].disk_id = 1 + (order - 1) * 2;
+                request->DiskPage_data.diskStruct[1].unit = 0x22;
+                request->DiskPage_data.diskStruct[1].reserve = 0;
+                request->DiskPage_data.diskStruct[1].total_size = pools[(order - 1) * 2 + 1].total_size;
+                request->DiskPage_data.diskStruct[1].used_size = pools[(order - 1) * 2 + 1].used_size;
+                if(request->DiskPage_data.diskStruct[1].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[1].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[1].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[1].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[1].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[1].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[1].temp = pools[(order - 1) * 2 + 1].highest_temp;
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[1].name[i] = pools[(order - 1) * 2 + 1].name[i];
+                }
+                request->DiskPage_data.diskStruct[1].name[sizeof(pools[(order - 1) * 2 + 1].name) + 1] = 0;
+                request->DiskPage_data.diskStruct[1].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
+            }
+        }
+        else
+        {
+            //linux
+            request->DiskPage_data.diskcount = disk_count;
+            int disk_index = (order - 1) * 2;
+            if (order <= 0 || disk_index < 0 || disk_index >= disk_count) {
+                request->DiskPage_data.count = 0;
+                return offsetof(Request, DiskPage_data.crc) + 1;
+            }
+            if((disk_count - (order-1)*2) == 1)
+            {
+                request->DiskPage_data.count = 1;
+                request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
+                request->DiskPage_data.diskStruct[0].unit = 0x22;
+                request->DiskPage_data.diskStruct[0].reserve = 0;
+                request->DiskPage_data.diskStruct[0].total_size = disks[(order - 1) * 2].total_size;
+                request->DiskPage_data.diskStruct[0].used_size = disks[(order - 1) * 2].used_size;
+                if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[0].temp = disks[(order - 1) * 2].temperature;
+                //reserve name
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[0].name[i] = disks[(order - 1) * 2].device[i];
+                }
+                request->DiskPage_data.diskStruct[0].name[sizeof(disks[(order - 1) * 2].device) + 1] = 0;
+                request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
+            }
+            else
+            {
+                //First
+                request->DiskPage_data.count = 2;
+                request->DiskPage_data.diskStruct[0].disk_id = (order - 1) * 2; //id >= 0
+                request->DiskPage_data.diskStruct[0].unit = 0x22;
+                request->DiskPage_data.diskStruct[0].reserve = 0;
+                request->DiskPage_data.diskStruct[0].total_size = disks[(order - 1) * 2].total_size;
+                request->DiskPage_data.diskStruct[0].used_size = disks[(order - 1) * 2].used_size;
+                if(request->DiskPage_data.diskStruct[0].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[0].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[0].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[0].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[0].temp = disks[(order - 1) * 2].temperature;
+                //reserve name
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[0].name[i] = disks[(order - 1) * 2].device[i];
+                }
+                request->DiskPage_data.diskStruct[0].name[sizeof(disks[(order - 1) * 2].device) + 1] = 0;
+                request->DiskPage_data.diskStruct[0].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
+                //Second
+                request->DiskPage_data.diskStruct[1].disk_id = 1 + (order - 1) * 2;
+                request->DiskPage_data.diskStruct[1].unit = 0x22;
+                request->DiskPage_data.diskStruct[1].reserve = 0;
+                request->DiskPage_data.diskStruct[1].total_size = disks[(order - 1) * 2 + 1].total_size;
+                request->DiskPage_data.diskStruct[1].used_size = disks[(order - 1) * 2 + 1].used_size;
+                if(request->DiskPage_data.diskStruct[1].total_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[1].total_size /= 1024;
+                    request->DiskPage_data.diskStruct[1].unit += 1;
+                }
+                if(request->DiskPage_data.diskStruct[1].used_size > 4000)
+                {
+                    request->DiskPage_data.diskStruct[1].used_size /= 1024;
+                    request->DiskPage_data.diskStruct[1].unit += 0x10;
+                }
+                request->DiskPage_data.diskStruct[1].temp = disks[(order - 1) * 2 + 1].temperature;
+                for (int i = 0; i < 15; i++)
+                {
+                    request->DiskPage_data.diskStruct[1].name[i] = disks[(order - 1) * 2 + 1].device[i];
+                }
+                request->DiskPage_data.diskStruct[1].name[sizeof(disks[(order - 1) * 2 + 1].device) + 1] = 0;
+                request->DiskPage_data.diskStruct[1].disklength = sizeof(request->DiskPage_data.diskStruct[0]);
+            }
+        }
+
+        return offsetof(Request, DiskPage_data.crc) + 1;
+    case ModePage_AIM:
+        request->length += sizeof(request->ModePage_data);
+        request->ModePage_data.mute = 1;
+        request->ModePage_data.properties = 0;
+        return offsetof(Request, ModePage_data.crc) + 1;
+    case WlanPage_AIM:
+        request->length += sizeof(request->WlanPage_data);
+        request->WlanPage_data.order = order;
+        request->WlanPage_data.total = total;
+        request->WlanPage_data.netcount = total;
+        request->WlanPage_data.count = 1;
+        request->WlanPage_data.online = GetUserCount();
+        request->WlanPage_data.length = (sizeof(request->WlanPage_data.wlanPage) + 1);
+        request->WlanPage_data.wlanPage.id = order - 1;//order from 1 id from 0
+        request->WlanPage_data.wlanPage.unit = 0x00;
+        double rx_speed, tx_speed, rx_total, tx_total;
+        char status[16], mac[18], ip[INET_ADDRSTRLEN], mask[INET_ADDRSTRLEN];
+        
+        network_interface_t *get_iface = &g_iface_manager.interfaces[order - 1];//order from 1 id from 0
+        printf("Interface: %s\n", get_iface->interface_name);
+        if(get_interface_basic_info(get_iface->interface_name,status, mac, ip, mask) == 0)
+        {
+            printf("Status:    %s\n", status);
+            printf("MAC:       %s\n", mac);
+            printf("IP:        %s\n", ip);
+            printf("Netmask:   %s\n", mask);
+        }
+        if(get_interface_traffic_info(get_iface->interface_name, &rx_speed, &tx_speed, &rx_total, &tx_total) == 0)
+        {
+            printf("RX Speed:  %.2f KB/s\n", rx_speed);
+            printf("TX Speed:  %.2f KB/s\n", tx_speed);
+            printf("Total RX:  %.2f MB\n", rx_total);
+            printf("Total TX:  %.2f MB\n", tx_total);
+        }
+        if(tx_speed > 1024)
+        {
+            request->WlanPage_data.wlanPage.unit += 0x10;
+            tx_speed /= 1024;
+            if(tx_speed > 1024)
+            {
+                request->WlanPage_data.wlanPage.unit += 0x10;
+                tx_speed /= 1024;
+                if(tx_speed > 1024)
+                {
+                    request->WlanPage_data.wlanPage.unit += 0x10;
+                    tx_speed /= 1024;
+                }
+            }
+        }
+        if(rx_speed > 1024)
+        {
+            request->WlanPage_data.wlanPage.unit += 0x01;
+            rx_speed /= 1024;
+            if(rx_speed > 1024)
+            {
+                request->WlanPage_data.wlanPage.unit += 0x01;
+                rx_speed /= 1024;
+                if(rx_speed > 1024)
+                {
+                    request->WlanPage_data.wlanPage.unit += 0x01;
+                    rx_speed /= 1024;
+                    
+                }
+            }
+        }
+        printf("TX Speed: %f,RX Speed: %f\n",tx_speed,rx_speed);
+        request->WlanPage_data.wlanPage.uploadspeed = tx_speed;
+        request->WlanPage_data.wlanPage.downloadspeed = rx_speed;
+        printf("TX Speed: %d,RX Speed: %d\n",request->WlanPage_data.wlanPage.uploadspeed,request->WlanPage_data.wlanPage.downloadspeed);
+        int a,b,c,d;
+        if (sscanf(ip, "%d.%d.%d.%d", &a, &b, &c, &d) == 4) 
+        {
+            request->WlanPage_data.wlanPage.ip[0] = (unsigned char)a;
+            request->WlanPage_data.wlanPage.ip[1] = (unsigned char)b;
+            request->WlanPage_data.wlanPage.ip[2] = (unsigned char)c;
+            request->WlanPage_data.wlanPage.ip[3] = (unsigned char)d;
+        }
+        for (int i = 0; i < sizeof(request->WlanPage_data.wlanPage.name); i++)
+        {
+            request->WlanPage_data.wlanPage.name[i] = get_iface->interface_name[i];
+        }
+        
+        return offsetof(Request, WlanPage_data.crc) + 1;
+    case InfoPage_AIM:
+        request->length += sizeof(request->InfoPage_data);
+        request->InfoPage_data.order = order;
+        request->InfoPage_data.total = total;
+        request->InfoPage_data.reserve = 0;
+        request->InfoPage_data.namelength = sizeof(request->InfoPage_data.name);
+        switch (order)
+        {
+        case 1:
+            for (int i = 0; i < sizeof(request->InfoPage_data.name); i++)
+            {
+                request->InfoPage_data.name[i] = sys_info.devicename[i];
+            }
+            break;
+        case 2:
+            for (int i = 0; i < sizeof(request->InfoPage_data.name); i++)
+            {
+                request->InfoPage_data.name[i] = sys_info.cpuname[i];
+            }
+            break;
+        case 3:
+            for (int i = 0; i < sizeof(request->InfoPage_data.name); i++)
+            {
+                request->InfoPage_data.name[i] = sys_info.operatename[i];
+            }
+            break;
+        case 4:
+            for (int i = 0; i < sizeof(request->InfoPage_data.name); i++)
+            {
+                request->InfoPage_data.name[i] = sys_info.serial_number[i];
+            }
+            break;
+        default:
+            break;
+        }
+        return offsetof(Request, InfoPage_data.crc) + 1;
+    case GetVer_AIM:
+        request->length += sizeof(request->Version_data);
+        return offsetof(Request, Version_data.crc) + 1;
+    case Updatefw_AIM:
+        request->length += sizeof(request->OTA_Enddata);
+        //Send empty package
+        return offsetof(Request, OTA_Enddata.crc) + 1;   
+    default:
+        return 0;
+    }
+}
+void append_crc(Request *request) {
+    int len = 0;
+    int off = 0;
+    unsigned short crc = 0;
+    switch (request->aim)
+    {
+        case TIME_AIM:
+            len = offsetof(Request, time_data.crc);
+            request->time_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case SystemPage_AIM:
+            len = offsetof(Request, SystemPage_data.crc);
+            request->SystemPage_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case System_AIM:
+            len = offsetof(Request, system_data.crc);
+            request->system_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case DiskPage_AIM:
+            len = offsetof(Request, DiskPage_data.crc);
+            request->DiskPage_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case Disk_AIM:
+            len = offsetof(Request, disk_data.crc);
+            request->disk_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case ModePage_AIM:
+            len = offsetof(Request, ModePage_data.crc);
+            request->ModePage_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case WlanPage_AIM:
+            len = offsetof(Request, WlanPage_data.crc);
+            request->WlanPage_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case InfoPage_AIM:
+            len = offsetof(Request, InfoPage_data.crc);
+            request->InfoPage_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case USER_AIM:
+            len = offsetof(Request, user_data.crc);
+            request->user_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case WlanSpeed_AIM:
+            len = offsetof(Request, speed_data.crc);
+            request->speed_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case WlanTotal_AIM:
+            len = offsetof(Request, flow_data.crc);
+            request->flow_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case WlanIP_AIM:
+            len = offsetof(Request, wlanip_data.crc);
+            request->wlanip_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case GetVer_AIM:
+            len = offsetof(Request, Version_data.crc);
+            request->Version_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case Updatefw_AIM:
+            len = offsetof(Request, OTA_data.crc);
+            request->OTA_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        case Updatefw_info_AIM:
+            len = offsetof(Request, UpgradeInfo_data.crc);
+            request->UpgradeInfo_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+        default:
+            len = offsetof(Request, common_data.crc);
+            request->common_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+    }
+}
+void appendEmpty_crc(Request *request) {
+    int len = 0;
+    int off = 0;
+    unsigned short crc = 0;
+    switch (request->aim)
+    {
+        case Updatefw_AIM:
+            len = offsetof(Request, OTA_Enddata.crc);
+            request->OTA_Enddata.crc = cal_crc((unsigned char *)request, len);
+            return;
+    
+        default:
+            len = offsetof(Request, common_data.crc);
+            request->common_data.crc = cal_crc((unsigned char *)request, len);
+            return;
+    }
+}
+// unsafe
+unsigned char cal_crc(unsigned char * data, int len) {
+    int off = 0;
+    unsigned short crc = 0;
+    for (; off < len; off++) {
+        crc += *((unsigned char *)(data) + off);
+        #if hidwritedebug
+        if(off == 5)
+        {
+            printf("AIM:");
+        }
+        printf("0x%02X ",*((unsigned char *)(data) + off));
+        #endif
+    }
+    #if hidwritedebug
+    printf("\n");
+    #endif
+    return (unsigned char)(crc & 0xff);
+}
+
+int get_cpu_temperature() {
+    FILE *temp_file;
+    char path[512];
+    int temperature = -1;
+    
+    // 方法1: 尝试标准thermal zones
+    for (int i = 0; i < 20; i++) {
+        snprintf(path, sizeof(path), "/sys/class/thermal/thermal_zone%d/temp", i);
+        temp_file = fopen(path, "r");
+        if (temp_file != NULL) {
+            int temp_raw;
+            if (fscanf(temp_file, "%d", &temp_raw) == 1) {
+                temperature = temp_raw / 1000;
+                
+                // 验证温度值是否合理
+                if (temperature > 0 && temperature < 150) {
+                    fclose(temp_file);  // 只在返回前关闭
+                    return temperature;
+                }
+                // 温度不合理，继续尝试其他zone
+            }
+            fclose(temp_file);  // 统一在这里关闭
+        }
+    }
+    // 方法2: 尝试hwmon接口 (更通用)
+    temperature = read_temperature_from_hwmon();
+    if (temperature != -1) {
+        return temperature;
+    }
+    // 方法5: 如果是TrueNAS，尝试特定路径
+    // if (is_truenas_system()) {
+    //     temperature = read_temperature_for_truenas();
+    //     if (temperature != -1) {
+    //         return temperature;
+    //     }
+    // }
+    
+    return -1;
+}
+// 安全路径构建辅助函数
+static int safe_path_join(char *dest, size_t dest_size, 
+                         const char *path1, const char *path2) {
+    if (!dest || !path1 || !path2) return -1;
+    
+    size_t len1 = strlen(path1);
+    size_t len2 = strlen(path2);
+    size_t total_len = len1 + len2 + 2; // +1 for '/', +1 for '\0'
+    
+    if (total_len > dest_size) {
+        // 缓冲区不足，进行安全截断
+        if (dest_size > len2 + 2) {
+            // 可以容纳部分路径1
+            size_t max_len1 = dest_size - len2 - 2;
+            strncpy(dest, path1, max_len1);
+            dest[max_len1] = '\0';
+            strcat(dest, "/");
+            strcat(dest, path2);
+            return 1; // 表示有截断
+        } else {
+            // 空间严重不足
+            dest[0] = '\0';
+            return -1;
+        }
+    }
+    
+    snprintf(dest, dest_size, "%s/%s", path1, path2);
+    return 0;
+}
+// 从hwmon子系统读取温度
+int read_temperature_from_hwmon(void) {
+    DIR *dir;
+    struct dirent *entry;
+    char hwmon_path[PATH_MAX];
+    char temp_path[PATH_MAX];
+    char name_path[PATH_MAX];
+    FILE *temp_file;
+    int max_temp = -1;
+    
+    // 使用PATH_MAX常量（通常4096）
+    #ifndef PATH_MAX
+    #define PATH_MAX 4096
+    #endif
+    
+    // 打开hwmon目录
+    dir = opendir("/sys/class/hwmon");
+    if (!dir) {
+        return -1;
+    }
+    
+    while ((entry = readdir(dir)) != NULL) {
+        // 跳过.和..
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        
+        // 构建hwmon路径
+        if (snprintf(hwmon_path, sizeof(hwmon_path), 
+                    "/sys/class/hwmon/%s", entry->d_name) >= (int)sizeof(hwmon_path)) {
+            // 路径过长，跳过这个设备
+            continue;
+        }
+        
+        // 安全构建name路径
+        if (safe_path_join(name_path, sizeof(name_path), hwmon_path, "name") < 0) {
+            continue;
+        }
+        
+        FILE *name_file = fopen(name_path, "r");
+        if (name_file) {
+            char sensor_name[64];
+            if (fgets(sensor_name, sizeof(sensor_name), name_file)) {
+                // 去除换行符
+                sensor_name[strcspn(sensor_name, "\n")] = 0;
+                
+                // 检查是否是CPU温度传感器
+                if (strstr(sensor_name, "coretemp") || 
+                    strstr(sensor_name, "k10temp") ||
+                    strstr(sensor_name, "cpu") ||
+                    strstr(sensor_name, "Core")) {
+                    
+                    // 查找温度文件
+                    DIR *temp_dir = opendir(hwmon_path);
+                    if (temp_dir) {
+                        struct dirent *temp_entry;
+                        while ((temp_entry = readdir(temp_dir)) != NULL) {
+                            // 查找temp*_input文件
+                            if (strstr(temp_entry->d_name, "temp") && 
+                                strstr(temp_entry->d_name, "_input")) {
+                                
+                                // 安全构建温度文件路径
+                                if (safe_path_join(temp_path, sizeof(temp_path), 
+                                                  hwmon_path, temp_entry->d_name) < 0) {
+                                    continue;
+                                }
+                                
+                                temp_file = fopen(temp_path, "r");
+                                if (temp_file) {
+                                    int temp_raw;
+                                    if (fscanf(temp_file, "%d", &temp_raw) == 1) {
+                                        int temp_c = temp_raw / 1000;
+                                        if (temp_c > max_temp) {
+                                            max_temp = temp_c;
+                                        }
+                                    }
+                                    fclose(temp_file);
+                                }
+                            }
+                        }
+                        closedir(temp_dir);
+                    }
+                }
+            }
+            fclose(name_file);
+        }
+    }
+    
+    closedir(dir);
+    return max_temp;
+}
+
+
+
+// 读取CPU数据
+void read_cpu_data(CPUData *data) {
+    FILE *file = fopen("/proc/stat", "r");
+    if (file == NULL) {
+        perror("Error opening /proc/stat");
+        exit(EXIT_FAILURE);
+    }
+    
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        if (strncmp(line, "cpu ", 4) == 0) {
+            sscanf(line + 5, "%lu %lu %lu %lu %lu %lu %lu",
+                   &data->user, &data->nice, &data->system, &data->idle,
+                   &data->iowait, &data->irq, &data->softirq);
+            break;
+        }
+    }
+    
+    fclose(file);
+}
+// 计算CPU使用率
+float calculate_cpu_usage(const CPUData *prev, const CPUData *curr) {
+    unsigned long prev_idle = prev->idle + prev->iowait;
+    unsigned long curr_idle = curr->idle + curr->iowait;
+    
+    unsigned long prev_non_idle = prev->user + prev->nice + prev->system + 
+                                 prev->irq + prev->softirq;
+    unsigned long curr_non_idle = curr->user + curr->nice + curr->system + 
+                                 curr->irq + curr->softirq;
+    
+    unsigned long prev_total = prev_idle + prev_non_idle;
+    unsigned long curr_total = curr_idle + curr_non_idle;
+    
+    unsigned long total_delta = curr_total - prev_total;
+    unsigned long idle_delta = curr_idle - prev_idle;
+    
+    if (total_delta == 0) return 0.0;
+    //printf("CPU total_delta: %ld, idle_delta: %ld\n", total_delta, idle_delta);
+    return (total_delta - idle_delta) * 100.0 / total_delta;
+}
+// 获取iGPU温度（摄氏度）
+int get_igpu_temperature() {
+    FILE *file;
+    char path[512];//Use 512
+    char line[256];
+    
+    // 直接尝试已知的AMD温度传感器路径
+    const char *temp_patterns[] = {
+        "/sys/class/drm/card0/device/hwmon/hwmon*/temp1_input",
+        "/sys/class/drm/card1/device/hwmon/hwmon*/temp1_input",
+        "/sys/class/hwmon/hwmon*/temp1_input",
+        NULL
+    };
+    
+    for (int i = 0; temp_patterns[i] != NULL; i++) {
+        // 使用glob处理通配符
+        glob_t globbuf;
+        if (glob(temp_patterns[i], 0, NULL, &globbuf) == 0) {
+            for (size_t j = 0; j < globbuf.gl_pathc; j++) {
+                // 检查路径长度
+                if (strlen(globbuf.gl_pathv[j]) >= 512) {
+                    continue;
+                }
+                
+                file = fopen(globbuf.gl_pathv[j], "r");
+                if (file) {
+                    if (fgets(line, sizeof(line), file)) {
+                        int temp = atoi(line) / 1000;
+                        fclose(file);
+                        globfree(&globbuf);
+                        return temp;
+                    }
+                    fclose(file);
+                }
+            }
+            globfree(&globbuf);
+        }
+    }
+    
+    return -1;
+}
+
+// 获取iGPU使用率
+float get_igpu_usage() {
+    FILE *file;
+    char path[512];
+    char line[256];
+    
+    const char *usage_paths[] = {
+        "/sys/class/drm/card0/device/gpu_busy_percent",
+        "/sys/class/drm/card1/device/gpu_busy_percent",
+        "/sys/class/drm/card2/device/gpu_busy_percent",
+        NULL
+    };
+    
+    for (int i = 0; usage_paths[i] != NULL; i++) {
+        file = fopen(usage_paths[i], "r");
+        if (file) {
+            if (fgets(line, sizeof(line), file)) {
+                float usage = atof(line);
+                fclose(file);
+                return usage;
+            }
+            fclose(file);
+        }
+    }
+    
+    return -1.0;
+}
+//ReadMemory Useage
+unsigned int get_memory_usage(){
+    struct sysinfo info;
+    if(sysinfo(&info) != 0)
+    {
+        return 0.0;
+        /* data */
+    }
+    else
+    {
+        unsigned usage = (info.totalram-info.freeram-info.bufferram) * 100 / info.totalram;
+        return usage;
+    }
+}
+
+// void parse_request(Request *request) {
+//     for (int off = 0; off < 0x40; off++) {
+//         printf("%d ", *(((unsigned char *)request) + off));
+//     }
+//     printf("\n");
+//     printf("length: %u\n", request->length);
+// }
+
+// void parse_ack(Ack *ack, unsigned char aim) {
+//     int len = 0;
+//     switch (aim)
+//     {
+//         case TIME_AIM:
+
+//             len = offsetof(Ack, time_data.crc);
+//             break;
+
+//         case USER_AIM:
+//             len = offsetof(Ack, user_data.crc);
+//             break;
+
+//         default:
+//             len = offsetof(Ack, common_data.crc);
+//             break;
+//     }
+
+//     for (int off = 0; off < len; off++) {
+//         printf("%u ", *(((unsigned char *)ack) + off));
+//     }
+//     printf("\n");
+
+//     printf("[debug] ack->header: %x\n", ack->header);
+//     printf("[debug] ack->sequence: %x\n", ack->sequence);
+//     printf("[debug] ack->length: %x\n", ack->length);
+//     printf("[debug] ack->cmd: %x\n", ack->cmd);
+//     printf("[debug] ack->err: %x\n", ack->err);
+// }
+//Disk
+int execute_command(const char* command, char* output, size_t output_size) {
+    if (command == NULL || output == NULL || output_size == 0) {
+        return -1;
+    }
+    
+    // 调试：打印执行的命令
+    printf("[DEBUG] Executing: %s\n", command);
+    
+    FILE* fp = popen(command, "r");
+    if (fp == NULL) {
+        fprintf(stderr, "[ERROR] Failed to execute: %s\n", command);
+        return -1;
+    }
+    
+    output[0] = '\0';
+    size_t total_read = 0;
+    char buffer[256];
+    
+    while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        size_t len = strlen(buffer);
+        if (total_read + len < output_size - 1) {
+            strcat(output, buffer);
+            total_read += len;
+        } else {
+            // 输出截断警告
+            strncat(output, buffer, output_size - total_read - 1);
+            fprintf(stderr, "[WARNING] Output truncated for command: %s\n", command);
+            break;
+        }
+    }
+    
+    int status = pclose(fp);
+    int exit_status = WEXITSTATUS(status);
+    
+    // 调试：打印退出状态
+    printf("[DEBUG] Command exited with status: %d\n", exit_status);
+    
+    return exit_status;
+}
+
+void trim_string(char* str) {
+    if (str == NULL || *str == '\0') {
+        return;
+    }
+    
+    char* start = str;
+    char* end;
+    
+    while (*start && isspace((unsigned char)*start)) {
+        start++;
+    }
+    
+    if (*start == '\0') {
+        str[0] = '\0';
+        return;
+    }
+    
+    end = start + strlen(start) - 1;
+    while (end > start && isspace((unsigned char)*end)) {
+        end--;
+    }
+    
+    *(end + 1) = '\0';
+    
+    if (start != str) {
+        memmove(str, start, end - start + 2);
+    }
+}
+
+int file_exists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+int read_file(const char* path, char* buffer, size_t buffer_size) {
+    if (!file_exists(path) || buffer == NULL || buffer_size == 0) {
+        return -1;
+    }
+    
+    FILE* file = fopen(path, "r");
+    if (file == NULL) {
+        return -1;
+    }
+    
+    if (fgets(buffer, buffer_size, file) == NULL) {
+        fclose(file);
+        return -1;
+    }
+    
+    fclose(file);
+    trim_string(buffer);
+    return 0;
+}
+
+char* extract_disk_name(const char* device_path) {
+    if (device_path == NULL) {
+        return NULL;
+    }
+    
+    const char* slash = strrchr(device_path, '/');
+    if (slash == NULL) {
+        return strdup(device_path);
+    }
+    
+    const char* name = slash + 1;
+    char* result = strdup(name);
+    if (result == NULL) {
+        return NULL;
+    }
+    
+    if (strncmp(result, "nvme", 4) == 0) {
+        char* p = strrchr(result, 'p');
+        if (p != NULL && isdigit((unsigned char)*(p+1))) {
+            *p = '\0';
+        }
+    } else {
+        char* p = result;
+        while (*p && !isdigit((unsigned char)*p)) {
+            p++;
+        }
+        if (*p) {
+            *p = '\0';
+        }
+    }
+    
+    return result;
+}
+
+int is_valid_device_name(const char* name) {
+    if (name == NULL || strlen(name) == 0) {
+        return 0;
+    }
+    
+    if (strcmp(name, "NAME") == 0 ||
+        strcmp(name, "state:") == 0 ||
+        strcmp(name, "config:") == 0 ||
+        strcmp(name, "errors:") == 0 ||
+        strcmp(name, "scan:") == 0 ||
+        strcmp(name, "mirror") == 0 ||
+        strcmp(name, "raidz") == 0 ||
+        strcmp(name, "raidz1") == 0 ||
+        strcmp(name, "raidz2") == 0 ||
+        strcmp(name, "raidz3") == 0 ||
+        strcmp(name, "draid") == 0 ||
+        strcmp(name, "spare") == 0 ||
+        strcmp(name, "cache") == 0 ||
+        strcmp(name, "log") == 0 ||
+        strcmp(name, "special") == 0) {
+        return 0;
+    }
+    
+    if (strncmp(name, "sd", 2) == 0 ||
+        strncmp(name, "hd", 2) == 0 ||
+        strncmp(name, "vd", 2) == 0 ||
+        strncmp(name, "nvme", 4) == 0 ||
+        strncmp(name, "da", 2) == 0) {
+        return 1;
+    }
+    
+    if (is_uuid_format(name)) {
+        return 1;
+    }
+    
+    return 0;
+}
+
+int is_uuid_format(const char* str) {
+    if (str == NULL || strlen(str) != 36) {
+        return 0;
+    }
+    
+    for (int i = 0; i < 36; i++) {
+        char c = str[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != '-') return 0;
+        } else {
+            if (!isxdigit((unsigned char)c)) return 0;
+        }
+    }
+    
+    return 1;
+}
+
+unsigned long long parse_size(const char* size_str) {
+    unsigned long long value = 0;
+    char unit = 0;
+    double float_value = 0.0;
+    
+    if (sscanf(size_str, "%lf%c", &float_value, &unit) == 2) {
+        value = (unsigned long long)(float_value + 0.5);
+    } else if (sscanf(size_str, "%llu%c", &value, &unit) == 2) {
+        // 已经是整数
+    } else if (sscanf(size_str, "%llu", &value) == 1) {
+        return value;
+    } else {
+        return 0;
+    }
+    
+    switch (toupper(unit)) {
+        case 'K': return value * 1024ULL;
+        case 'M': return value * 1024ULL * 1024ULL;
+        case 'G': return value * 1024ULL * 1024ULL * 1024ULL;
+        case 'T': return value * 1024ULL * 1024ULL * 1024ULL * 1024ULL;
+        default:  return value;
+    }
+}
+
+// ==================== 核心功能函数实现 ====================
+
+int get_all_pools(PoolInfo* pools, int max_pools) {
+    char command[MAX_COMMAND];
+    char output[MAX_OUTPUT];
+    int count = 0;
+    
+    // 简单的命令，不需要检查长度
+    snprintf(command, sizeof(command), "zpool list -H -o name 2>/dev/null");
+    
+    if (execute_command(command, output, sizeof(output)) != 0) {
+        return 0;
+    }
+    
+    char* line = strtok(output, "\n");
+    while (line != NULL && count < max_pools) {
+        trim_string(line);
+        
+        if (strlen(line) > 0) {
+            // 安全复制池名
+            strncpy(pools[count].name, line, sizeof(pools[count].name) - 1);
+            pools[count].name[sizeof(pools[count].name) - 1] = '\0';
+            
+            pools[count].total_size = 0;
+            pools[count].used_size = 0;
+            pools[count].free_size = 0;
+            pools[count].disk_count = 0;
+            pools[count].highest_temp = -1;
+            
+            count++;
+        }
+        
+        line = strtok(NULL, "\n");
+    }
+    
+    return count;
+}
+
+int get_pool_info(PoolInfo* pool) {
+    if (pool == NULL || pool->name[0] == '\0') {
+        return -1;
+    }
+    
+    char command[2048];
+    char output[MAX_OUTPUT];
+    char escaped_pool_name[MAX_PATH * 2]; // 用于转义池名
+    
+    // 转义池名中的特殊字符（特别是空格和shell元字符）
+    memset(escaped_pool_name, 0, sizeof(escaped_pool_name));
+    for (int i = 0, j = 0; pool->name[i] && j < (int)sizeof(escaped_pool_name) - 1; i++) {
+        if (strchr(" \t\n\r\"'$`&|;<>()[]{}*?!~\\", pool->name[i])) {
+            escaped_pool_name[j++] = '\\';
+        }
+        escaped_pool_name[j++] = pool->name[i];
+    }
+    
+    // 构建命令
+    int required_len = snprintf(NULL, 0, 
+                               "zpool list -H -o size,allocated,free '%s' 2>&1", 
+                               escaped_pool_name);
+    
+    if (required_len >= (int)sizeof(command)) {
+        fprintf(stderr, "Error: Pool name too long for command: %s\n", pool->name);
+        return -1;
+    }
+    
+    snprintf(command, sizeof(command), 
+             "zpool list -H -o size,allocated,free '%s' 2>&1", 
+             escaped_pool_name);
+    
+    printf("Executing command: %s\n", command); // 调试输出
+    
+    if (execute_command(command, output, sizeof(output)) != 0) {
+        fprintf(stderr, "Failed to execute command for pool: %s\n", pool->name);
+        return -1;
+    }
+    
+    // 检查命令输出
+    printf("Raw output for pool %s: %s\n", pool->name, output);
+    
+    char size_str[64], alloc_str[64], free_str[64];
+    if (sscanf(output, "%63s %63s %63s", size_str, alloc_str, free_str) != 3) {
+        fprintf(stderr, "Failed to parse zpool list output for %s: %s\n", pool->name, output);
+        return -1;
+    }
+    
+    printf("Parsed sizes: total=%s, used=%s, free=%s\n", size_str, alloc_str, free_str);
+    
+    pool->total_size = parse_size(size_str) / 1073741824ULL; // GB
+    pool->used_size = parse_size(alloc_str) / 1073741824ULL;
+    pool->free_size = parse_size(free_str) / 1073741824ULL;
+    
+    printf("Calculated sizes: total=%lluGB, used=%lluGB, free=%lluGB\n", 
+           pool->total_size, pool->used_size, pool->free_size);
+    
+    return 0;
+}
+
+int get_pool_disks_and_partuuids(PoolInfo* pool) {
+    if (pool == NULL) {
+        return 0;
+    }
+    
+    char command[MAX_COMMAND];
+    char output[MAX_OUTPUT];
+    
+    // 检查池名长度是否安全
+    int required_len = snprintf(NULL, 0, 
+                               "zpool status %s 2>/dev/null", 
+                               pool->name);
+    
+    if (required_len >= (int)sizeof(command)) {
+        fprintf(stderr, "Error: Pool name too long for command: %s\n", pool->name);
+        return 0;
+    }
+    
+    snprintf(command, sizeof(command), "zpool status %s 2>/dev/null", pool->name);
+    
+    if (execute_command(command, output, sizeof(output)) != 0) {
+        return 0;
+    }
+    
+    pool->disk_count = 0;
+    
+    char* saveptr;
+    char* line = strtok_r(output, "\n", &saveptr);
+    int in_config_section = 0;
+    int after_config_header = 0;
+    
+    while (line != NULL && pool->disk_count < MAX_DISKS_PER_POOL) {
+        trim_string(line);
+        
+        if (strcmp(line, "config:") == 0) {
+            in_config_section = 1;
+            line = strtok_r(NULL, "\n", &saveptr);
+            continue;
+        }
+        
+        if (in_config_section && strlen(line) == 0) {
+            in_config_section = 0;
+        }
+        
+        if (in_config_section) {
+            if (strstr(line, "NAME") != NULL && strstr(line, "STATE") != NULL) {
+                after_config_header = 1;
+                line = strtok_r(NULL, "\n", &saveptr);
+                continue;
+            }
+            
+            if (after_config_header) {
+                // 安全比较池名
+                size_t pool_name_len = strlen(pool->name);
+                size_t line_len = strlen(line);
+                
+                if (strcmp(line, pool->name) == 0 || 
+                    (line_len >= pool_name_len && 
+                     strncmp(line, pool->name, pool_name_len) == 0)) {
+                    line = strtok_r(NULL, "\n", &saveptr);
+                    continue;
+                }
+                
+                char device_name[MAX_PATH];
+                if (sscanf(line, "%255s", device_name) == 1) {
+                    if (is_valid_device_name(device_name)) {
+                        DiskInfo* disk = &pool->disks[pool->disk_count];
+                        
+                        strncpy(disk->name, device_name, sizeof(disk->name) - 1);
+                        disk->name[sizeof(disk->name) - 1] = '\0';
+                        
+                        // 获取 PARTUUID
+                        char partuuid_cmd[MAX_COMMAND];
+                        char partuuid_output[MAX_PATH];
+                        char partuuid[MAX_PATH] = "";
+                        
+                        if (is_uuid_format(device_name)) {
+                            strncpy(partuuid, device_name, sizeof(partuuid) - 1);
+                            partuuid[sizeof(partuuid) - 1] = '\0';
+                        } else {
+                            // 检查设备名长度是否安全
+                            int cmd_required_len = snprintf(NULL, 0,
+                                                          "blkid /dev/%s 2>/dev/null | grep -o 'PARTUUID=\"[^\"]*\"' | cut -d'\"' -f2",
+                                                          device_name);
+                            
+                            if (cmd_required_len < (int)sizeof(partuuid_cmd)) {
+                                snprintf(partuuid_cmd, sizeof(partuuid_cmd),
+                                        "blkid /dev/%s 2>/dev/null | grep -o 'PARTUUID=\"[^\"]*\"' | cut -d'\"' -f2",
+                                        device_name);
+                                
+                                if (execute_command(partuuid_cmd, partuuid_output, sizeof(partuuid_output)) == 0) {
+                                    trim_string(partuuid_output);
+                                    if (strlen(partuuid_output) > 0) {
+                                        strncpy(partuuid, partuuid_output, sizeof(partuuid) - 1);
+                                        partuuid[sizeof(partuuid) - 1] = '\0';
+                                    }
+                                }
+                            }
+                        }
+                        
+                        strncpy(disk->partuuid, partuuid, sizeof(disk->partuuid) - 1);
+                        disk->partuuid[sizeof(disk->partuuid) - 1] = '\0';
+                        
+                        disk->device_path[0] = '\0';
+                        disk->disk_name[0] = '\0';
+                        disk->temperature = -1;
+                        
+                        pool->disk_count++;
+                    }
+                }
+            }
+        }
+        
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+    
+    return pool->disk_count;
+}
+
+char* find_device_by_partuuid(const char *partuuid) {
+    if (partuuid == NULL || strlen(partuuid) == 0) {
+        return NULL;
+    }
+    
+    char command[MAX_COMMAND];
+    char *device_path = NULL;
+    FILE *fp;
+    
+    // 检查 PARTUUID 长度是否安全
+    int required_len = snprintf(NULL, 0,
+                               "blkid | grep 'PARTUUID=\"%s\"' | cut -d: -f1",
+                               partuuid);
+    
+    if (required_len >= (int)sizeof(command)) {
+        fprintf(stderr, "Error: PARTUUID too long for command\n");
+        return NULL;
+    }
+    
+    snprintf(command, sizeof(command), 
+             "blkid | grep 'PARTUUID=\"%s\"' | cut -d: -f1", 
+             partuuid);
+    
+    fp = popen(command, "r");
+    if (fp == NULL) {
+        return NULL;
+    }
+    
+    char buffer[MAX_PATH];
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        buffer[strcspn(buffer, "\n")] = 0;
+        trim_string(buffer);
+        if (strlen(buffer) > 0) {
+            device_path = strdup(buffer);
+        }
+    }
+    
+    pclose(fp);
+    return device_path;
+}
+
+static void normalize_block_device(const char *device, char *base, size_t base_size) {
+    const char *name = device != NULL ? strrchr(device, '/') : NULL;
+    name = name != NULL ? name + 1 : device;
+    if (name == NULL || base == NULL || base_size == 0) {
+        if (base != NULL && base_size > 0) base[0] = '\0';
+        return;
+    }
+
+    snprintf(base, base_size, "%s", name);
+    if (strncmp(base, "nvme", 4) == 0) {
+        // nvme0n1p2 -> nvme0n1; nvme0n1 is already a whole device.
+        char *partition = strstr(base + 4, "p");
+        if (partition != NULL && partition[1] != '\0') {
+            bool digits = true;
+            for (char *p = partition + 1; *p != '\0'; p++) {
+                if (!isdigit((unsigned char)*p)) {
+                    digits = false;
+                    break;
+                }
+            }
+            if (digits) *partition = '\0';
+        }
+    } else {
+        // sda1 -> sda; mmcblk0p1 -> mmcblk0. Keep a whole mmcblk0 device.
+        char *partition = strrchr(base, 'p');
+        if (partition != NULL && partition[1] != '\0') {
+            bool digits = true;
+            for (char *p = partition + 1; *p != '\0'; p++) {
+                if (!isdigit((unsigned char)*p)) {
+                    digits = false;
+                    break;
+                }
+            }
+            if (digits) *partition = '\0';
+        }
+        if (strncmp(base, "sd", 2) == 0 || strncmp(base, "hd", 2) == 0 ||
+            strncmp(base, "vd", 2) == 0 || strncmp(base, "xvd", 3) == 0) {
+            size_t len = strlen(base);
+            while (len > 0 && isdigit((unsigned char)base[len - 1])) {
+                base[--len] = '\0';
+            }
+        }
+    }
+}
+
+static int read_temperature_input(const char *path) {
+    char value[32];
+    if (read_file(path, value, sizeof(value)) != 0) return -1;
+
+    char *end = NULL;
+    long temp = strtol(value, &end, 10);
+    if (end == value) return -1;
+    if (temp > 1000) temp /= 1000;
+    if (temp < -20 || temp > 120) return -1;
+    return (int)temp;
+}
+
+static int read_hwmon_temperature_for_device(const char *device) {
+    char pattern[MAX_PATH];
+    const char *patterns[] = {
+        "/sys/block/%s/device/hwmon/hwmon*/temp*_input",
+        "/sys/block/%s/hwmon/hwmon*/temp*_input",
+        "/sys/class/nvme/%s/device/hwmon/hwmon*/temp*_input",
+        "/sys/class/nvme/%s/hwmon/hwmon*/temp*_input"
+    };
+
+    for (size_t i = 0; i < sizeof(patterns) / sizeof(patterns[0]); i++) {
+        snprintf(pattern, sizeof(pattern), patterns[i], device);
+        glob_t matches = {0};
+        if (glob(pattern, GLOB_NOSORT, NULL, &matches) == 0) {
+            for (size_t j = 0; j < matches.gl_pathc; j++) {
+                int temp = read_temperature_input(matches.gl_pathv[j]);
+                if (temp >= 0) {
+                    globfree(&matches);
+                    return temp;
+                }
+            }
+        }
+        globfree(&matches);
+    }
+
+    // drivetemp commonly exposes hwmon nodes below /sys/class/hwmon rather
+    // than below /sys/block. Match the hwmon device symlink to this disk.
+    glob_t matches = {0};
+    if (glob("/sys/class/hwmon/hwmon*/temp*_input", GLOB_NOSORT, NULL, &matches) == 0) {
+        for (size_t i = 0; i < matches.gl_pathc; i++) {
+            char hwmon_dir[MAX_PATH];
+            snprintf(hwmon_dir, sizeof(hwmon_dir), "%s", matches.gl_pathv[i]);
+            char *slash = strrchr(hwmon_dir, '/');
+            if (slash == NULL) continue;
+            *slash = '\0';
+
+            char link_path[MAX_PATH];
+            snprintf(link_path, sizeof(link_path), "%s/device", hwmon_dir);
+            char resolved[MAX_PATH];
+            if (realpath(link_path, resolved) == NULL || strstr(resolved, device) == NULL) {
+                continue;
+            }
+
+            int temp = read_temperature_input(matches.gl_pathv[i]);
+            if (temp >= 0) {
+                globfree(&matches);
+                return temp;
+            }
+        }
+    }
+    globfree(&matches);
+    return -1;
+}
+
+static int parse_smartctl_temperature_line(const char *line) {
+    if (line == NULL || (strstr(line, "Temperature") == NULL &&
+                         strstr(line, "temperature") == NULL)) {
+        return -1;
+    }
+
+    int last_temperature = -1;
+    const char *cursor = line;
+    while (*cursor != '\0') {
+        if (*cursor == '0' && (cursor[1] == 'x' || cursor[1] == 'X')) {
+            cursor += 2;
+            while (isxdigit((unsigned char)*cursor)) cursor++;
+            continue;
+        }
+        if (*cursor == '-' || isdigit((unsigned char)*cursor)) {
+            char *end = NULL;
+            long value = strtol(cursor, &end, 10);
+            if (end != cursor && value >= 0 && value <= 120) {
+                last_temperature = (int)value;
+            }
+            if (end != cursor) {
+                cursor = end;
+                continue;
+            }
+        }
+        cursor++;
+    }
+    return last_temperature;
+}
+
+static int read_smartctl_temperature(const char *device) {
+    if (device == NULL || device[0] == '\0' ||
+        system("command -v smartctl >/dev/null 2>&1") != 0) {
+        return -1;
+    }
+
+    for (const char *p = device; *p != '\0'; p++) {
+        if (!isalnum((unsigned char)*p) && *p != '_' && *p != '-' && *p != '.') {
+            return -1;
+        }
+    }
+
+    char command[MAX_COMMAND];
+    const char *prefix = geteuid() == 0 ? "" : "sudo -n ";
+    snprintf(command, sizeof(command),
+             "%ssmartctl -A -n standby,0 /dev/%s 2>/dev/null", prefix, device);
+    FILE *fp = popen(command, "r");
+    if (fp == NULL) return -1;
+
+    int temperature = -1;
+    char line[512];
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        int candidate = parse_smartctl_temperature_line(line);
+        if (candidate >= 0) temperature = candidate;
+    }
+    pclose(fp);
+    return temperature;
+}
+
+int get_disk_temperature(const char *device) {
+    char base[MAX_PATH];
+    normalize_block_device(device, base, sizeof(base));
+    if (base[0] == '\0') return -1;
+
+    int temperature = read_smartctl_temperature(base);
+    if (temperature >= 0) return temperature;
+
+    temperature = read_hwmon_temperature_for_device(base);
+    if (temperature >= 0) return temperature;
+
+    // Some older NVMe drivers expose a direct temperature file.
+    if (strncmp(base, "nvme", 4) == 0) {
+        char path[MAX_PATH];
+        char temp_value[32];
+        snprintf(path, sizeof(path), "/sys/class/nvme/%s/temperature", base);
+        if (read_file(path, temp_value, sizeof(temp_value)) == 0) {
+            char *end = NULL;
+            long value = strtol(temp_value, &end, 10);
+            if (end != temp_value && value >= -20 && value <= 120) return (int)value;
+        }
+    }
+
+    return -1;
+}
+
+int update_pool_temperatures(PoolInfo* pool) {
+    if (pool == NULL || pool->disk_count == 0) {
+        return 0;
+    }
+    
+    int got_temperature = 0;
+    pool->highest_temp = -1;
+    
+    printf("Getting disk temperatures...\n");
+    
+    for (int i = 0; i < pool->disk_count; i++) {
+        DiskInfo* disk = &pool->disks[i];
+        
+        if (strlen(disk->partuuid) > 0) {
+            char* device_path = find_device_by_partuuid(disk->partuuid);
+            if (device_path != NULL) {
+                strncpy(disk->device_path, device_path, sizeof(disk->device_path) - 1);
+                disk->device_path[sizeof(disk->device_path) - 1] = '\0';
+                
+                char* disk_name = extract_disk_name(disk->device_path);
+                if (disk_name != NULL) {
+                    strncpy(disk->disk_name, disk_name, sizeof(disk->disk_name) - 1);
+                    disk->disk_name[sizeof(disk->disk_name) - 1] = '\0';
+                    
+                    disk->temperature = get_disk_temperature(disk->disk_name);
+                    if (disk->temperature >= 0) {
+                        got_temperature = 1;
+                        if (disk->temperature > pool->highest_temp) {
+                            pool->highest_temp = disk->temperature;
+                        }
+                        printf("  Disk %s: %d°C (via PARTUUID %s)\n", 
+                               disk->disk_name, disk->temperature, disk->partuuid);
+                        free(disk_name);
+                        free(device_path);
+                        continue;
+                    }
+                    free(disk_name);
+                }
+                free(device_path);
+            }
+        }
+        
+        if (disk->temperature < 0 && strlen(disk->name) > 0) {
+            if (!is_uuid_format(disk->name)) {
+                strncpy(disk->disk_name, disk->name, sizeof(disk->disk_name) - 1);
+                disk->disk_name[sizeof(disk->disk_name) - 1] = '\0';
+                
+                char* base_disk_name = extract_disk_name(disk->disk_name);
+                if (base_disk_name != NULL) {
+                    disk->temperature = get_disk_temperature(base_disk_name);
+                    free(base_disk_name);
+                } else {
+                    disk->temperature = get_disk_temperature(disk->disk_name);
+                }
+                
+                if (disk->temperature >= 0) {
+                    got_temperature = 1;
+                    if (disk->temperature > pool->highest_temp) {
+                        pool->highest_temp = disk->temperature;
+                    }
+                    printf("  Disk %s: %d°C (direct)\n", disk->disk_name, disk->temperature);
+                }
+            }
+        }
+        
+        if (disk->temperature < 0) {
+            printf("  Disk %s: Temperature not available\n", disk->name);
+        }
+    }
+    
+    return got_temperature;
+}
+
+void display_pool_info(const PoolInfo* pool) {
+    if (pool == NULL) {
+        return;
+    }
+    
+    printf("\n=== Pool Summary: %s ===\n", pool->name);
+    
+    double total_gb = pool->total_size;
+    double used_gb = pool->used_size;
+    double free_gb = pool->free_size;
+    
+    printf("Capacity Information:\n");
+    printf("  Total Size: %.2f GB\n", total_gb);
+    printf("  Used Size:  %.2f GB\n", used_gb);
+    printf("  Free Size:  %.2f GB\n", free_gb);
+    
+    if (pool->total_size > 0) {
+        double usage = 100.0 - (pool->free_size * 100.0 / pool->total_size);
+        printf("  Usage:      %.1f%%\n", usage);
+    }
+    
+    printf("\nDisk Information:\n");
+    printf("  Total Disks: %d\n", pool->disk_count);
+    
+    if (pool->disk_count > 0) {
+        printf("  Disk Details:\n");
+        for (int i = 0; i < pool->disk_count; i++) {
+            const DiskInfo* disk = &pool->disks[i];
+            printf("    Disk %d: %s", i + 1, disk->name);
+            
+            if (strlen(disk->partuuid) > 0) {
+                printf(" (PARTUUID: %s)", disk->partuuid);
+            }
+            
+            if (disk->temperature >= 0) {
+                printf(" - %d°C", disk->temperature);
+            } else {
+                printf(" - Temperature N/A");
+            }
+            printf("\n");
+        }
+    }
+    
+    printf("\nTemperature Summary:\n");
+    if (pool->highest_temp >= 0) {
+        printf("  Highest Temperature: %d°C\n", pool->highest_temp);
+        
+        if (pool->highest_temp < 40) {
+            printf("  Status: Normal (Good)\n");
+        } else if (pool->highest_temp < 50) {
+            printf("  Status: Warning (Warm)\n");
+        } else if (pool->highest_temp < 60) {
+            printf("  Status: High (Hot)\n");
+        } else {
+            printf("  Status: Critical (Overheating!)\n");
+        }
+    } else {
+        printf("  Temperature information not available\n");
+    }
+    
+    printf("==============================\n");
+}
+// 检查并更新池列表
+void check_and_update_pools() {
+    char output[MAX_OUTPUT];
+    int current_count = 0;
+    
+    // 获取当前的池数量
+    if (execute_command("zpool list -H -o name 2>/dev/null | wc -l", output, sizeof(output)) == 0) {
+        current_count = atoi(output);
+    }
+    
+    // 如果数量不一致
+    if (current_count != pool_count) {
+        // 重新扫描所有池
+        rescan_all_pools();
+        // 更新记录的数量
+        pool_count = current_count;
+        Isinitial = false;
+    }
+    else
+    {
+        printf("Disk pools no change\n");
+    }
+}
+// 重新扫描所有池
+void rescan_all_pools() {
+    printf("rescan all pools...\n");
+    
+    // 清空现有池信息
+    memset(pools, 0, sizeof(pools));
+    pool_count = 0;
+    
+    // 重新获取所有池
+    pool_count = get_all_pools(pools, MAX_POOLS);
+    
+    if (pool_count == 0) {
+        printf("No storage pools found in the system.\n");
+        printf("Please check if ZFS is properly configured.\n");
+    }
+    else
+    {
+        for (int i = 0; i < pool_count; i++) {
+            printf("Processing pool: %s\n", pools[i].name);
+            printf("%s\n", "--------------------------------------");
+            
+            // 2.1 获取池的基本信息
+            if (get_pool_info(&pools[i]) != 0) {
+                printf("Failed to get basic information for pool %s\n", pools[i].name);
+                continue;
+            }
+            
+            // 2.2 获取池中所有磁盘及其 PARTUUID
+            int disk_count = get_pool_disks_and_partuuids(&pools[i]);
+            if (disk_count == 0) {
+                printf("No valid disks found in pool %s\n", pools[i].name);
+                continue;
+            }
+            
+            printf("Found %d disk(s) in pool %s\n", disk_count, pools[i].name);
+            
+            // 2.3 更新每个磁盘的温度信息
+            if (update_pool_temperatures(&pools[i]) == 0) {
+                printf("Warning: Failed to get temperature information for some disks\n");
+            }
+            
+            // 2.4 显示池的详细信息
+            display_pool_info(&pools[i]);
+            
+            printf("\n");
+        }
+    }
+}
+//Linux get disk information
+// 获取挂载点
+void get_mountpoint(const char *device, char *mountpoint) {
+    FILE *mtab;
+    struct mntent *entry;
+    char full_device[64];
+    
+    // 构建完整的设备路径
+    snprintf(full_device, sizeof(full_device), "/dev/%s", device);
+    
+    mtab = setmntent("/proc/mounts", "r");
+    if (mtab == NULL) {
+        return;
+    }
+    
+    // 查找设备的挂载点
+    while ((entry = getmntent(mtab)) != NULL) {
+        if (strcmp(entry->mnt_fsname, full_device) == 0) {
+            strncpy(mountpoint, entry->mnt_dir, 255);
+            mountpoint[255] = '\0';
+            break;
+        }
+        // 也检查分区（如 sda1, sda2 等）
+        if (strncmp(entry->mnt_fsname, full_device, strlen(full_device)) == 0) {
+            strncpy(mountpoint, entry->mnt_dir, 255);
+            mountpoint[255] = '\0';
+            break;
+        }
+    }
+    
+    endmntent(mtab);
+}
+
+// 获取挂载点使用情况
+int get_mountpoint_usage(const char *mountpoint, unsigned long long *total, 
+                        unsigned long long *free, unsigned long long *used) {
+    struct statvfs buf;
+    if (statvfs(mountpoint, &buf) != 0) {
+        return -1;
+    }
+    
+    *total = (unsigned long long)buf.f_blocks * buf.f_frsize;
+    *free = (unsigned long long)buf.f_bfree * buf.f_frsize;
+    *used = *total - *free;
+    
+    return 0;
+}
+
+static bool is_partition_device_name(const char *name) {
+    if (name == NULL) return false;
+
+    if (strncmp(name, "nvme", 4) == 0 || strncmp(name, "mmcblk", 6) == 0) {
+        const char *partition = strrchr(name, 'p');
+        if (partition == NULL || partition[1] == '\0') return false;
+        for (const char *p = partition + 1; *p != '\0'; p++) {
+            if (!isdigit((unsigned char)*p)) return false;
+        }
+        return true;
+    }
+
+    if (strncmp(name, "sd", 2) != 0 && strncmp(name, "hd", 2) != 0 &&
+        strncmp(name, "vd", 2) != 0 && strncmp(name, "xvd", 3) != 0) {
+        return false;
+    }
+    const char *p = name + strlen(name);
+    while (p > name && isdigit((unsigned char)p[-1])) p--;
+    return p != name + strlen(name);
+}
+
+// 扫描所有硬盘设备
+int scan_disk_devices(disk_info_t *disks, int max_disks) {
+    DIR *block_dir = opendir("/sys/block");
+    if (!block_dir) {
+        return 0;
+    }
+    
+    struct dirent *entry;
+    int disk_count = 0;
+    
+    while ((entry = readdir(block_dir)) != NULL && disk_count < max_disks) {
+        // 过滤掉虚拟设备和分区
+        if (strncmp(entry->d_name, "loop", 4) == 0 ||
+            strncmp(entry->d_name, "ram", 3) == 0 ||
+            strncmp(entry->d_name, "fd", 2) == 0 ||
+            is_partition_device_name(entry->d_name)) { // 排除分区
+            continue;
+        }
+        
+        // 只关注SATA和NVMe设备
+        if (strncmp(entry->d_name, "sd", 2) == 0 || 
+            strncmp(entry->d_name, "nvme", 4) == 0) {
+            char removable_path[512];
+            snprintf(removable_path, sizeof(removable_path), 
+                    "/sys/block/%s/removable", entry->d_name);
+            
+            FILE *removable_file = fopen(removable_path, "r");
+            if (removable_file) {
+                char removable;
+                if (fscanf(removable_file, "%c", &removable) == 1 && removable == '1') {
+                    fclose(removable_file);
+                    continue;  // 跳过U盘
+                }
+                fclose(removable_file);
+            }
+            strncpy(disks[disk_count].device, entry->d_name, 32);
+            
+            // 确定硬盘类型
+            if (strncmp(entry->d_name, "nvme", 4) == 0) {
+                strcpy(disks[disk_count].type, "NVMe");
+            } else {
+                strcpy(disks[disk_count].type, "SATA");
+            }
+            
+            // 获取基本信息
+            get_disk_identity(entry->d_name, 
+                            disks[disk_count].model, 
+                            disks[disk_count].serial);
+            
+            disks[disk_count].total_size = get_disk_size(entry->d_name)/1024/1024/1024;//Change to Gb
+            get_mountpoint(entry->d_name, disks[disk_count].mountpoint);
+            // 如果有挂载点，获取使用情况
+            if (strlen(disks[disk_count].mountpoint) > 0) {
+                
+                unsigned long long total, free, used;
+                if (get_mountpoint_usage(disks[disk_count].mountpoint, &total, &free, &used) == 0) {
+                    disks[disk_count].free_size = free/1024/1024/1024;//Change to Gb
+                    disks[disk_count].used_size = used/1024/1024/1024;//Change to Gb
+                    if (total > 0) {
+                        disks[disk_count].usage_percent = ((double)used / total) * 100.0;
+                    }
+                }
+            }
+            
+            // 获取温度
+            disks[disk_count].temperature = get_disk_temperature(entry->d_name);
+            
+            disk_count++;
+        }
+    }
+    
+    closedir(block_dir);
+    return disk_count;
+}
+// 获取硬盘型号和序列号
+void get_disk_identity(const char *device, char *model, char *serial) {
+    char path[MAX_PATH];
+    
+    // 获取型号
+    if (strncmp(device, "nvme", 4) == 0) {
+        snprintf(path, sizeof(path), "/sys/class/nvme/%s/model", device);
+    } else {
+        snprintf(path, sizeof(path), "/sys/block/%s/device/model", device);
+    }
+    
+    if (read_file(path, model, 128) != 0) {
+        strcpy(model, "Unknown");
+    } else {
+        // 去除换行符
+        model[strcspn(model, "\n")] = 0;
+    }
+    
+    // 获取序列号
+    if (strncmp(device, "nvme", 4) == 0) {
+        snprintf(path, sizeof(path), "/sys/class/nvme/%s/serial", device);
+    } else {
+        snprintf(path, sizeof(path), "/sys/block/%s/device/serial", device);
+    }
+    
+    if (read_file(path, serial, 64) != 0) {
+        strcpy(serial, "Unknown");
+    } else {
+        serial[strcspn(serial, "\n")] = 0;
+    }
+}
+
+// 获取硬盘总容量
+unsigned long long get_disk_size(const char *device) {
+    char path[MAX_PATH];
+    snprintf(path, sizeof(path), "/sys/block/%s/size", device);
+    
+    char size_str[32];
+    if (read_file(path, size_str, sizeof(size_str)) == 0) {
+        unsigned long long sectors = strtoull(size_str, NULL, 10);
+        return sectors * 512; // 转换为字节
+    }
+    return 0;
+}
+
+int update_disk_usage(disk_info_t *disk) {
+    if (!disk || strlen(disk->device) == 0) {
+        return -1;
+    }
+    
+    // 获取挂载点
+    char mountpoint[256] = {0};
+    get_mountpoint(disk->device, mountpoint);
+    
+    // 更新挂载点
+    strncpy(disk->mountpoint, mountpoint, sizeof(disk->mountpoint) - 1);
+    
+    // 如果有挂载点，获取使用情况
+    if (strlen(mountpoint) > 0) {
+        unsigned long long total, free, used;
+        if (get_mountpoint_usage(mountpoint, &total, &free, &used) == 0) {
+            disk->free_size = free / 1024 / 1024 / 1024;  // 转换为GB
+            disk->used_size = used / 1024 / 1024 / 1024;  // 转换为GB
+            if (total > 0) {
+                disk->usage_percent = ((double)used / total) * 100.0;
+            }
+            return 0;
+        }
+    }
+    
+    return -1;
+}
+int update_disk_temperature(disk_info_t *disk) {
+    if (!disk || strlen(disk->device) == 0) {
+        return -1;
+    }
+    
+    int temp = get_disk_temperature(disk->device);
+    if (temp >= 0) {  // 假设温度有效值为非负数
+        disk->temperature = temp;
+        return 0;
+    }
+    
+    return -1;
+}
+int refresh_linux_disks(disk_info_t *disks, int count) {
+    int updated = 0;
+    for (int i = 0; i < count; i++) {
+        // Do not carry a stale reading into EC feedback when a disk is
+        // asleep or its temperature source temporarily disappears.
+        disks[i].temperature = -1;
+        if (update_disk_usage(&disks[i]) == 0) {
+            updated++;
+        }
+        if (update_disk_temperature(&disks[i]) == 0) {
+            updated++;
+        }
+    }
+    updated /= 2;
+    return updated;
+}
+
+int GetUserCount()
+{
+    FILE *fp;
+    char buffer[1024];
+    int count = 0;
+    
+    // 统计所有通过网络连接的会话
+    fp = popen("who | grep -E '\\([0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\.[0-9]{1,3}\\)$' | wc -l", "r");
+    if (fp == NULL) {
+        return -1;
+    }
+    
+    if (fgets(buffer, sizeof(buffer), fp) != NULL) {
+        count = atoi(buffer);
+    }
+    
+    pclose(fp);
+    return count;
+}
+
+//6266 CMD
+// 获取 I/O 端口权限
+int acquire_io_permissions() {
+    ec_io_ready = false;
+    // 请求62/66端口权限
+    if (ioperm(ITE_EC_DATA_PORT, 1, 1) != 0) {
+        printf("错误: 无法获取端口 0x%02X 权限\n", ITE_EC_DATA_PORT);
+        return -1;
+    }
+    if (ioperm(ITE_EC_CMD_PORT, 1, 1) != 0) {
+        printf("错误: 无法获取端口 0x%02X 权限\n", ITE_EC_CMD_PORT);
+        ioperm(ITE_EC_DATA_PORT, 1, 0);
+        return -1;
+    }
+    #if DebugToken
+    printf("EC 62/66 Port Permission Get OK\n");
+    #endif
+    ec_io_ready = true;
+    return 0;
+}
+
+// 释放 I/O 端口权限
+void release_io_permissions() {
+    ec_io_ready = false;
+    ioperm(ITE_EC_DATA_PORT, 1, 0);
+    ioperm(ITE_EC_CMD_PORT, 1, 0);
+}
+// 等待 EC 就绪
+int ec_wait_ready() {
+    if (!ec_io_ready) {
+        return -1;
+    }
+    int timeout = 1000; // 超时时间
+    unsigned char status;
+    
+    while (timeout--) {
+        status = inb(ITE_EC_CMD_PORT);
+        if (!(status & 0x02)) { // 检查忙标志位
+            return 0;
+        }
+        usleep(100); // 等待 100μs
+    }
+    
+    fprintf(stderr, "EC timeout waiting for ready\n");
+    return -1;
+}
+
+// 写入 EC 索引
+void ec_write_index(unsigned char index) {
+    outb(index, ITE_EC_CMD_PORT);
+}
+
+// 写入 EC 数据
+void ec_write_data(unsigned char data) {
+    outb(data, ITE_EC_DATA_PORT);
+}
+
+// 读取 EC 数据
+unsigned char ec_read_data() {
+    return inb(ITE_EC_DATA_PORT);
+}
+// 读取 EC RAM 字节
+int ec_ram_read_byte(unsigned char address, unsigned char *value) {
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    
+    // 发送读取命令和地址
+    ec_write_index(EC_CMD_READ_RAM);
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    ec_write_data(address);
+    
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    //测试发现需要额外加一个delay不加会读上一次数据，Spec没有看到相关的说明，暂时为3000us
+    usleep(3000);
+    // 读取数据
+    *value = ec_read_data();
+    #if DebugToken
+    printf("EC RAM Read OK\n");
+    #endif
+    return 0;
+}
+
+static void read_cpu_ec_telemetry(unsigned char *temperature, unsigned char *rpm) {
+    unsigned char high = 0, low = 0;
+    if (temperature != NULL) {
+        *temperature = 255;
+    }
+    *rpm = 255;
+    if (acquire_io_permissions() != 0) {
+        return;
+    }
+    if (temperature != NULL) {
+        ec_ram_read_byte(0x70, temperature);
+    }
+    if (ec_ram_read_byte(0x76, &high) == 0 && ec_ram_read_byte(0x77, &low) == 0) {
+        *rpm = (high * 0xFF + low) / 42;
+    }
+    release_io_permissions();
+}
+
+// 写入 EC RAM 字节
+int ec_ram_write_byte(unsigned char address, unsigned char value) {
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    
+    // 发送写入命令、地址和数据
+    ec_write_index(EC_CMD_WRITE_RAM);
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    ec_write_data(address);
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    ec_write_data(value);
+    #if DebugToken
+    printf("EC RAM Write OK\n");
+    #endif
+    return ec_wait_ready();
+}
+
+static int guarded_ec_write_byte(unsigned char address, unsigned char value) {
+    if (!allow_ec_writes) {
+        if (!ec_write_notice) {
+            printf("EC write blocked by safe policy (0x%02X)\n", address);
+            ec_write_notice = true;
+        }
+        return 0;
+    }
+    return ec_ram_write_byte(address, value);
+}
+
+// 读取 EC RAM 区域
+int ec_ram_read_block(unsigned char start_addr, unsigned char *buffer, int length) {
+    for (int i = 0; i < length; i++) {
+        if (ec_ram_read_byte(start_addr + i, &buffer[i]) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// 写入 EC RAM 区域
+int ec_ram_write_block(unsigned char start_addr, unsigned char *data, int length) {
+    for (int i = 0; i < length; i++) {
+        if (guarded_ec_write_byte(start_addr + i, data[i]) < 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+// 查询 EC 版本信息
+int ec_query_version(char *version, int max_len) {
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    
+    ec_write_index(EC_CMD_QUERY);
+    ec_write_data(0x00); // 查询版本命令
+    
+    if (ec_wait_ready() < 0) {
+        return -1;
+    }
+    
+    // 读取版本字符串
+    for (int i = 0; i < max_len - 1; i++) {
+        unsigned char c = ec_read_data();
+        if (c == 0) {
+            version[i] = '\0';
+            break;
+        }
+        version[i] = c;
+    }
+    version[max_len - 1] = '\0';
+    
+    return 0;
+}
+
+// 检查nvidia-smi是否可用
+int nvidia_smi_available() {
+    return system("which nvidia-smi > /dev/null 2>&1") == 0;
+}
+
+// 获取单个GPU的完整信息
+#if DebugToken
+int nvidia_get_single_gpu_info(nvidia_gpu_info_t *gpu) { 
+    FILE *fp = popen("nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw,fan.speed,driver_version --format=csv,noheader,nounits 2>/dev/null", "r");
+    if (!fp) {
+        return -1;
+    }
+    
+    char line[512];
+    if (fgets(line, sizeof(line), fp)) {
+        // 解析CSV格式
+        char *tokens[9];
+        int token_count = 0;
+        char *token = strtok(line, ",");
+        
+        while (token && token_count < 9) {
+            // 去除前后空格和换行符
+            while (*token == ' ' || *token == '\t') token++;
+            char *end = token + strlen(token) - 1;
+            while (end > token && (*end == ' ' || *end == '\n' || *end == '\r' || *end == '\t')) *end-- = '\0';
+            
+            tokens[token_count++] = token;
+            token = strtok(NULL, ",");
+        }
+        
+        if (token_count >= 8) {
+            // 名称
+            strncpy(gpu->name, tokens[0], sizeof(gpu->name) - 1);
+            
+            // 温度
+            gpu->temperature = atoi(tokens[1]);
+            
+            // GPU使用率
+            gpu->utilization_gpu = atoi(tokens[2]);
+            
+            // 显存使用率
+            gpu->utilization_memory = atoi(tokens[3]);
+            
+            // 显存
+            gpu->memory_used = atol(tokens[4]);
+            gpu->memory_total = atol(tokens[5]);
+            
+            // 功耗
+            gpu->power_draw = atof(tokens[6]);
+            
+            // 风扇速度
+            if (token_count >= 8 && tokens[7][0] != '\0') {
+                gpu->fan_speed = atoi(tokens[7]);
+            } else {
+                gpu->fan_speed = 0;
+            }
+            
+            // 驱动版本
+            if (token_count >= 9) {
+                strncpy(gpu->driver_version, tokens[8], sizeof(gpu->driver_version) - 1);
+            } else {
+                strcpy(gpu->driver_version, "Unknown");
+            }
+            
+            pclose(fp);
+            return 0;
+        }
+    }
+    
+    pclose(fp);
+    return -1;
+}
+#endif
+// 快速获取GPU温度
+int nvidia_get_gpu_temperature() {
+    char command[] = "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null";
+    
+    FILE *fp = popen(command, "r");
+    if (!fp) return -1;
+    
+    char temp_str[16];
+    int temperature = -1;
+    if (fgets(temp_str, sizeof(temp_str), fp)) {
+        temperature = atoi(temp_str);
+    }
+    pclose(fp);
+    return temperature;
+}
+
+// 快速获取GPU使用率
+int nvidia_get_gpu_utilization() {
+    char command[] = "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null";
+    
+    FILE *fp = popen(command, "r");
+    if (!fp) return -1;
+    
+    char usage_str[16];
+    int utilization = -1;
+    if (fgets(usage_str, sizeof(usage_str), fp)) {
+        utilization = atoi(usage_str);
+    }
+    pclose(fp);
+    return utilization;
+}
+
+// 快速获取GPU风扇转速
+int nvidia_get_gpu_fan_speed() {
+    char command[] = "nvidia-smi --query-gpu=fan.speed --format=csv,noheader,nounits 2>/dev/null";
+    
+    FILE *fp = popen(command, "r");
+    if (!fp) return -1;
+    
+    char speed_str[16];
+    int fan_speed = -1;
+    if (fgets(speed_str, sizeof(speed_str), fp)) {
+        fan_speed = atoi(speed_str);
+    }
+    
+    pclose(fp);
+    return fan_speed;
+}
+
+// 获取GPU核心三要素：温度、使用率、风扇转速
+int nvidia_get_gpu_status(int *temp, int *usage, int *fan) {
+    *temp = nvidia_get_gpu_temperature();
+    *usage = nvidia_get_gpu_utilization();
+    *fan = nvidia_get_gpu_fan_speed();
+    
+    return (*temp >= 0 && *usage >= 0 && *fan >= 0) ? 0 : -1;
+}
+void nvidia_print_info() {
+    int temp, usage, fan;
+    
+    if (nvidia_get_gpu_status(&temp, &usage, &fan) != 0) {
+        printf("GPU: 无法获取信息\n");
+        return;
+    }
+    
+    printf("GPU: %d°C %d%% %d%%\n", temp, usage, fan);
+}
+// 信号处理函数
+void signal_handler(int sig) {
+    (void)sig;
+    running = 0;
+}
+void* usb_read_thread(void *arg) {
+    libusb_device_handle *handle = (libusb_device_handle *)arg;
+    unsigned char read_buf[MAXLEN] = {0};
+    int actual_length = 0;
+    int result;
+    
+    #ifdef USB_DEBUG
+    printf("USB read thread started\n");
+    #endif
+    
+    // 设置非阻塞读取
+    unsigned int timeout = 1000; // 1秒超时
+    
+    while (running) {
+        // 清零缓冲区
+        memset(read_buf, 0, sizeof(read_buf));
+        actual_length = 0;
+        
+        // 使用线程安全的USB读取
+        result = safe_usb_read_timeout(read_buf, sizeof(read_buf), &actual_length, timeout);
+        
+        if (result == LIBUSB_SUCCESS && actual_length > 0) {
+            // 检测其他命令...
+            if (actual_length >= 6 && 
+                read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
+                read_buf[2] == 0xff && read_buf[3] == 0x04 &&
+                read_buf[4] == 0x03 && read_buf[5] == 0x82) {
+                printf(">>> Hibernate command received!\n");
+                systemoperation(HIBERNATEATONCE_AIM, 0);
+                // system("shutdown -h now");
+            }
+            else if (actual_length >= 6 && 
+                     read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
+                     read_buf[2] == 0xff && read_buf[3] == 0x04 &&
+                     read_buf[4] == 0x03) {
+                switch (read_buf[5]) {
+                    case HomePage_AIM:
+                        PageIndex = HomePage_AIM;
+                        break;
+                    case SystemPage_AIM:
+                        PageIndex = SystemPage_AIM;
+                        break;
+                    case DiskPage_AIM:
+                        PageIndex = DiskPage_AIM;
+                        break;
+                    case WlanPage_AIM:
+                        PageIndex = WlanPage_AIM;
+                        break;
+                    case Properties_AIM:
+                        PageIndex = HomePage_AIM;
+                        acquire_io_permissions();
+                        guarded_ec_write_byte(0x98, 0x05); // Performance
+                        release_io_permissions();
+                        break;
+                    case Balance_AIM:
+                        PageIndex = HomePage_AIM;
+                        acquire_io_permissions();
+                        guarded_ec_write_byte(0x98, 0x03); // Balance
+                        release_io_permissions();
+                        break;
+                    case InfoPage_AIM:
+                        PageIndex = InfoPage_AIM;
+                        break;
+                    default:
+                        PageIndex = HomePage_AIM;
+                        break;
+                }
+                #ifdef USB_DEBUG
+                printf(">>> PageChange command received! 0x%02X\n", PageIndex);
+                #endif
+            }
+            else if (actual_length >= 6 && 
+                     read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
+                     read_buf[2] == 0x00 && read_buf[3] == 0x07) {
+                Ver[0] = read_buf[5];
+                Ver[1] = read_buf[6];
+                Ver[2] = read_buf[7];
+                Ver[3] = read_buf[8];
+                
+                #if 1
+                printf(">>> Version info received: %d.%d.%d.%d\n", 
+                       Ver[0], Ver[1], Ver[2], Ver[3]);
+                #endif
+            }
+            else if (actual_length >= 6 && 
+                     read_buf[0] == 0xa5 && read_buf[1] == 0x5a && 
+                     read_buf[3] == 0x04 && read_buf[4] == UPDATE) {
+                if (read_buf[5]) {
+                    // != 0 Fail
+                    printf("Failed to receive OTA data,:%d\n",read_buf[5]);
+                } else {
+                    printf(">>>Success to get permission\n" );
+                }
+            }
+            else {
+                #if 1
+                printf(">>> Received %d bytes:\n", actual_length);
+                for (int i = 0; i < actual_length; i++) {
+                    printf("%02X ", read_buf[i]);
+                    if ((i + 1) % 16 == 0) printf("\n");
+                }
+                printf("\n");
+                #endif
+            }
+
+            
+        } else if (result == LIBUSB_ERROR_TIMEOUT) {
+            // 超时是正常的，继续循环
+            continue;
+        } else if (result < 0) {
+            if(!OTAEnable)
+            {
+                // 其他错误
+                printf("Error reading from USB device: %s (error code: %d)\n", 
+                    libusb_error_name(result), result);
+                
+                /* Stop both workers before main closes their shared handle. */
+                running = 0;
+                break;
+            }
+        }
+        
+        // 短暂休眠，防止CPU占用过高
+        usleep(10000); // 10ms
+    }
+    
+    printf("USB read thread exited\n");
+    return NULL;
+}
+
+// 添加带超时参数的安全读取函数
+int safe_usb_read_timeout(unsigned char *data, int length, int *actual_length, 
+                          unsigned int timeout_ms) {
+    int result = -1;
+    
+    #ifdef USB_DEBUG
+    printf("[safe_read] Attempting to read (timeout: %dms)\n", timeout_ms);
+    #endif
+    
+    // 检查设备句柄
+    if (handle == NULL) {
+        printf("[safe_read] ERROR: Device handle is NULL\n");
+        return -1;
+    }
+    
+    // 直接调用 libusb_bulk_transfer，不使用互斥锁
+    // 因为 libusb_bulk_transfer 本身是线程安全的
+    result = libusb_bulk_transfer(handle, EP_IN, data, length, 
+                                  actual_length, timeout_ms);
+    
+    #ifdef USB_DEBUG
+    printf("[safe_read] Result: %d (%s)\n", result, libusb_error_name(result));
+    if (result == LIBUSB_SUCCESS) {
+        printf("[safe_read] Received %d bytes\n", *actual_length);
+    }
+    #endif
+    
+    return result;
+}
+
+// 修改usb_bulk_transfer_with_retry函数，添加重试次数参数
+int usb_bulk_transfer_with_retry(libusb_device_handle *handle, 
+                                 unsigned char endpoint, 
+                                 unsigned char *data, 
+                                 int length, 
+                                 int *transferred, 
+                                 unsigned int timeout,
+                                 int max_retries) {
+    int retries = 0;
+    int result;
+    
+    while (retries <= max_retries) {
+        result = libusb_bulk_transfer(handle, endpoint, data, length, 
+                                      transferred, timeout);
+        
+        if (result == LIBUSB_SUCCESS) {
+            return LIBUSB_SUCCESS;
+        }
+        
+        // 如果是超时错误，可以重试
+        if (result == LIBUSB_ERROR_TIMEOUT) {
+            if (max_retries > 0) {
+                retries++;
+                printf("USB transfer timeout, retry %d/%d\n", retries, max_retries);
+                usleep(100000); // 等待100ms后重试
+                continue;
+            } else {
+                // 超时不重试，直接返回
+                return result;
+            }
+        }
+        
+        // 其他错误直接返回
+        break;
+    }
+    
+    return result;
+}
+
+// 创建和管理读取线程的函数
+pthread_t read_thread;
+int start_usb_read_thread() {
+    if (handle == NULL) {
+        printf("Cannot start read thread: USB device not initialized\n");
+        return -1;
+    }
+    
+    if (!running) {
+        return -1;
+    }
+    
+    printf("[Read Thread] Creating read thread...\n");
+    printf("[Read Thread] Device handle: %p\n", (void*)handle);
+    printf("[Read Thread] Endpoint EP_IN: 0x%02X\n", EP_IN);
+    
+    int result = pthread_create(&read_thread, NULL, usb_read_thread, (void*)handle);
+    if (result != 0) {
+        printf("Failed to create USB read thread: error %d\n", result);
+        return -1;
+    }
+    
+    printf("[Read Thread] Thread created successfully, thread ID: %lu\n", 
+           (unsigned long)read_thread);
+    return 0;
+}
+
+void stop_usb_read_thread() {
+    running = 0; // 停止运行标志
+    
+    // 等待线程结束
+    if (read_thread) {
+        pthread_join(read_thread, NULL);
+        printf("USB read thread stopped\n");
+    }
+}
+
+// 线程安全的USB写入函数
+int safe_usb_write(unsigned char *data, int length) {
+    int transferred = 0;
+    
+    pthread_mutex_lock(&usb_mutex);
+    
+    if (handle == NULL) {
+        printf("USB device not initialized\n");
+        pthread_mutex_unlock(&usb_mutex);
+        return -1;
+    }
+    
+    int result = libusb_bulk_transfer(handle, EP_OUT, data, length, 
+                                      &transferred, TIMEOUT_MS);
+    
+    pthread_mutex_unlock(&usb_mutex);
+    
+    if (result != LIBUSB_SUCCESS) {
+        printf("USB write error: %s\n", libusb_error_name(result));
+        return -1;
+    }
+    
+    return transferred;  // 成功时返回写入的字节数
+}
+// 发送线程函数
+void* usb_send_thread(void* arg) {
+    printf("HID send thread start\n");
+    
+    while (running) {
+        if(Isinitial)
+        {
+            int local_hour_time_div;
+            pthread_mutex_lock(&hour_time_mutex);
+            local_hour_time_div = HourTimeDiv;
+            pthread_mutex_unlock(&hour_time_mutex);
+            // 发送HID数据
+            if(local_hour_time_div % 60 == 0)
+            {
+                //1 Min Do
+                if(pool_count)
+                {
+                    for (int i = 0; i < pool_count; i++) {
+                        int diskreportsize = init_hidreport(&request, SET, Disk_AIM, i);
+                        append_crc(&request);
+                        memcpy(buffer, &request, diskreportsize);
+                        if (safe_usb_write(buffer, diskreportsize) == -1) {
+                        printf("Failed to write Disk data\n");
+                        break;
+                        }
+                        #if DebugToken
+                        printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
+                        #endif
+                        printf("diskreportsize: %d\n",diskreportsize);
+                        printf("DiskId: %d\n",request.disk_data.disk_info.disk_id);
+                        printf("Diskunit: %d\n",request.disk_data.disk_info.unit);
+                        printf("Disktotal: %d\n",request.disk_data.disk_info.total_size);
+                        printf("Diskused: %d\n",request.disk_data.disk_info.used_size);
+                        printf("Disktemp: %d\n",request.disk_data.disk_info.temp);
+                        printf("DiskCRC: %d\n",request.disk_data.crc);
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+                        memset(&request, 0x0, sizeof(Request));
+                        // 休眠1秒，但分段休眠以便及时响应退出
+                        for (int i = 0; i < 10 && running; i++) {
+                            usleep(100000); // 100ms
+                        }
+                    }
+                }
+                else
+                {
+                    refresh_linux_disks(disks,disk_count);
+                    for (int i = 0; i < disk_count; i++)
+                    {
+                        int diskreportsize = init_hidreport(&request, SET, Disk_AIM, i);
+                        append_crc(&request);
+                        memcpy(buffer, &request, diskreportsize);
+                        if (safe_usb_write(buffer, diskreportsize) == -1) {
+                        printf("Failed to write Disk data\n");
+                        break;
+                        }
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+                        memset(&request, 0x0, sizeof(Request));
+                        // 休眠1秒，但分段休眠以便及时响应退出
+                        for (int i = 0; i < 10 && running; i++) {
+                            usleep(100000); // 100ms
+                        }
+                    }
+                    
+                }
+
+            }
+            if(local_hour_time_div % 600 == 0)
+            {
+                // Time
+                int timereportsize = init_hidreport(&request, SET, TIME_AIM, 255);
+                append_crc(&request);
+                memcpy(buffer, &request, timereportsize);
+                if (safe_usb_write(buffer, timereportsize) == -1) {
+                    printf("Failed to write TIME data\n");
+                    break;
+                }
+                memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                TimeSleep1Sec();
+                #if DebugToken
+                printf("-----------------------------------TimeSendOK-----------------------------------\n");
+                #endif
+                //WLAN IP
+                int wlansize;
+                for (int i = 0; i < g_iface_manager.count; i++)
+                {
+                    wlansize = init_hidreport(&request, SET, WlanTotal_AIM,i);
+                    append_crc(&request);
+                    memcpy(buffer, &request, wlansize);
+                    if (safe_usb_write(buffer, wlansize) == -1) {
+                        printf("Failed to write WLANTotal data\n");
+                    break;
+                    }
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                    TimeSleep1Sec();
+                }
+                #if DebugToken
+                printf("-----------------------------------TotalflowSendOK-----------------------------------\n");
+                #endif
+                for (int i = 0; i < g_iface_manager.count; i++)
+                {
+                    wlansize = init_hidreport(&request, SET, WlanIP_AIM, i);
+                    append_crc(&request);
+                    memcpy(buffer, &request, wlansize);
+                    if (safe_usb_write(buffer, wlansize) == -1) {
+                        printf("Failed to write WlanIP data\n");
+                    }
+                    TimeSleep1Sec();
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                }
+                #if DebugToken
+                printf("-----------------------------------WLANIPSendOK-----------------------------------\n");
+                #endif
+                // Refresh storage metadata only when explicitly enabled.
+                // Unraid has no ZFS pool event to poll, so rescan its block
+                // devices instead of running zpool on every refresh.
+                if (enable_storage) {
+                    if (pool_count > 0) {
+                        check_and_update_pools();
+                    } else {
+                        int previous_disk_count = disk_count;
+                        disk_count = scan_disk_devices(disks, MAX_DISKS_PER_POOL);
+                        if (disk_count != previous_disk_count) {
+                            printf("Unraid disk scan: %d device(s)\n", disk_count);
+                        }
+                    }
+                }
+
+                /*
+                 * TrueNAS exposes ZFS pools; Unraid commonly exposes an
+                 * array/cache disk list instead. Reset the value every
+                 * refresh and use the direct-disk fallback when no pool
+                 * exists, otherwise EC feedback can receive a stale zero.
+                 */
+                disk_maxtemp = 0;
+                if (pool_count > 0)
+                {
+                    for (int i = 0; i < pool_count; i++)
+                    {
+                        if (pools[i].highest_temp != -1)
+                        {
+                            for (int j = 0; j < pools[i].disk_count; j++)
+                            {
+                                if(pools[i].disks[j].temperature > disk_maxtemp)
+                                {
+                                    disk_maxtemp = pools[i].disks[j].temperature;
+                                }
+                            }
+                        }
+                    }
+                }
+                else if (disk_count > 0)
+                {
+                    refresh_linux_disks(disks, disk_count);
+                    for (int i = 0; i < disk_count; i++)
+                    {
+                        if (disks[i].temperature > disk_maxtemp)
+                        {
+                            disk_maxtemp = disks[i].temperature;
+                        }
+                    }
+                }
+                else
+                {
+                    printf("No disk temperatures available for EC feedback\n");
+                }
+                if(IsNvidiaGPU)
+                {
+                    DGPUtemp = nvidia_get_gpu_temperature();
+                    if(DGPUtemp > 0 && DGPUtemp > disk_maxtemp)
+                    {
+                        // 获取 I/O 权限
+                        acquire_io_permissions();
+                        guarded_ec_write_byte(0x56,DGPUtemp);
+                        guarded_ec_write_byte(0xB0,DGPUtemp);
+                        guarded_ec_write_byte(0xB1,0);
+                        // 释放 I/O 权限
+                        release_io_permissions();
+                    }
+                    else if (disk_maxtemp > 0)
+                    {
+                        // 获取 I/O 权限
+                        acquire_io_permissions();
+                        guarded_ec_write_byte(0x56,disk_maxtemp);
+                        guarded_ec_write_byte(0xB0,0);
+                        guarded_ec_write_byte(0xB1,disk_maxtemp);
+                        // 释放 I/O 权限
+                        release_io_permissions();
+                    }
+                    else
+                    {
+                        printf("Skipping EC feedback: no valid disk or GPU temperature\n");
+                    }
+                }
+                else if (disk_maxtemp > 0)
+                {
+                    // 获取 I/O 权限
+                    acquire_io_permissions();
+                    guarded_ec_write_byte(0x56,disk_maxtemp);
+                    guarded_ec_write_byte(0xB0,0);
+                    guarded_ec_write_byte(0xB1,disk_maxtemp);
+                    // 释放 I/O 权限
+                    release_io_permissions();
+                }
+                else
+                {
+                    printf("Skipping EC feedback: no valid disk temperature\n");
+                }
+            }
+            switch (PageIndex)
+            {
+                case HomePage_AIM:
+                    //Use 10Mins send once
+                    // // Time
+                    // int timereportsize = init_hidreport(&request, SET, TIME_AIM, 255);
+                    // append_crc(&request);
+                    // if (safe_usb_write(buffer, timereportsize) == -1) {
+                    //     printf("Failed to write TIME data\n");
+                    //     break;
+                    // }
+                    // memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+memset(&request, 0x0, sizeof(Request));
+                    // TimeSleep1Sec();
+                    // #if DebugToken
+                    // printf("-----------------------------------TimeSendOK-----------------------------------\n");
+                    // #endif
+                    break;
+                case SystemPage_AIM:
+                    //*****************************************************/
+                    // CPU
+                    int systemreportsize = init_hidreport(&request, SET, System_AIM,0);
+                    append_crc(&request);
+                    memcpy(buffer, &request, systemreportsize);
+                    if (safe_usb_write(buffer, systemreportsize) == -1) {
+                        printf("Failed to write CPU data\n");
+                        break;
+                    }
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                    TimeSleep1Sec();
+                    #if DebugToken
+                    printf("-----------------------------------CPUSendOK-----------------------------------\n");
+                    #endif
+
+                    systemreportsize = init_hidreport(&request, SET, System_AIM,1);        
+                    append_crc(&request);
+                    memcpy(buffer, &request, systemreportsize);
+                    if (safe_usb_write(buffer, systemreportsize) == -1) {
+                        printf("Failed to write iGPU data\n");
+                        break;
+                    }
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                    TimeSleep1Sec();
+                    #if DebugToken
+                    printf("-----------------------------------iGPUSendOK-----------------------------------\n");
+                    #endif
+                    //*****************************************************/
+                    // Memory Usage
+                    int memusagesize = init_hidreport(&request, SET, System_AIM,2);
+                    append_crc(&request);
+                    memcpy(buffer, &request, memusagesize);
+                    if (safe_usb_write(buffer, memusagesize) == -1) {
+                        printf("Failed to write MEMORY data\n");
+                        break;
+                    }
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                    TimeSleep1Sec();
+                    #if DebugToken
+                    printf("-----------------------------------MemorySendOK-----------------------------------\n");
+                    #endif
+                    if(IsNvidiaGPU)
+                    {
+                        int dgpusize = init_hidreport(&request, SET, System_AIM,3);
+                        append_crc(&request);
+                        memcpy(buffer, &request, dgpusize);
+                        if (safe_usb_write(buffer, dgpusize) == -1) {
+                            printf("Failed to write GPU data\n");
+                        break;
+                        }
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                        TimeSleep1Sec();
+                        #if DebugToken
+                        printf("-----------------------------------GPUSendOK-----------------------------------\n");
+                        #endif
+                    }
+                    break;
+                case DiskPage_AIM:
+                    
+                    for (int i = 0; i < pool_count; i++) {
+                        if (pools[i].highest_temp != -1) {
+                            int diskreportsize = init_hidreport(&request, SET, Disk_AIM, i);
+                            append_crc(&request);
+                            memcpy(buffer, &request, diskreportsize);
+                            if (safe_usb_write(buffer, diskreportsize) == -1) {
+                            printf("Failed to write Disk data\n");
+                            break;
+                            }
+                            #if DebugToken
+                            printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
+                            #endif
+                            printf("diskreportsize: %d\n",diskreportsize);
+                            printf("DiskId: %d\n",request.disk_data.disk_info.disk_id);
+                            printf("Diskunit: %d\n",request.disk_data.disk_info.unit);
+                            printf("Disktotal: %d\n",request.disk_data.disk_info.total_size);
+                            printf("Diskused: %d\n",request.disk_data.disk_info.used_size);
+                            printf("Disktemp: %d\n",request.disk_data.disk_info.temp);
+                            printf("DiskCRC: %d\n",request.disk_data.crc);
+                            memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                            // 休眠1秒，但分段休眠以便及时响应退出
+                            for (int i = 0; i < 10 && running; i++) {
+                                usleep(100000); // 100ms
+                            }
+                            #if DebugToken
+                            printf("-----------------------------------DiskSendOK %d times-----------------------------------\n",(i+1));
+                            #endif
+                        }
+                    }
+
+                    break;
+                case WlanPage_AIM:
+                    //*****************************************************/
+                    // User Online
+                    int usersize = init_hidreport(&request, SET, USER_AIM,255);
+                    append_crc(&request);
+                    memcpy(buffer, &request, usersize);
+                    if (safe_usb_write(buffer, usersize) == -1) {
+                        printf("Failed to write USER data\n");
+                        break;
+                    }
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                    TimeSleep1Sec();
+                    #if DebugToken
+                    printf("-----------------------------------UserSendOK-----------------------------------\n");
+                    #endif
+                    
+                    int wlanspeedsize,wlantotalsize,wlanip;
+                    for (int i = 0; i < g_iface_manager.count; i++)
+                    {
+                        wlanspeedsize = init_hidreport(&request, SET, WlanSpeed_AIM,i);
+                        append_crc(&request);
+                        memcpy(buffer, &request, wlanspeedsize);
+                        if (safe_usb_write(buffer, wlanspeedsize) == -1) {
+                            printf("Failed to write WLANSpeed data\n");
+                        break;
+                        }
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                        TimeSleep1Sec();
+                         wlantotalsize = init_hidreport(&request, SET, WlanTotal_AIM,i);
+                        append_crc(&request);
+                        memcpy(buffer, &request, wlanspeedsize);
+                        if (safe_usb_write(buffer, wlantotalsize) == -1) {
+                            printf("Failed to write WLANTotal data\n");
+                        break;
+                        }
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                        TimeSleep1Sec();
+                        wlanip = init_hidreport(&request, SET, WlanIP_AIM, i);
+                        append_crc(&request);
+                        memcpy(buffer, &request, wlanip);
+                        if (safe_usb_write(buffer, wlanip) == -1) {
+                            printf("Failed to write WlanIP data\n");
+                        }
+                        TimeSleep1Sec();
+                        memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+    memset(&request, 0x0, sizeof(Request));
+                        #if DebugToken
+                        printf("-----------------------------------WLANSpeedTotalSendOK%dTime-----------------------------------\n",i);
+                        #endif
+                    }
+                   
+                    #if DebugToken
+                    printf("-----------------------------------WLANSpeedTotalSendOK-----------------------------------\n");
+                    #endif
+                    break;
+            
+            default:
+                break;
+            }
+        }
+        else
+        {
+            //Re initial diskpage
+            #if DebugToken
+            printf("-----------------------------------DiskPage initial start-----------------------------------\n");
+            #endif
+            int diskforcount = 0;
+            
+            if(pool_count != 0)
+            {
+                if(pool_count % 2 == 0)
+                    diskforcount = pool_count / 2;
+                else
+                    diskforcount = pool_count / 2 + 1;
+                int diskpage;
+                for (int i = 0; i < diskforcount; i++) {
+                    diskpage = first_init_hidreport(&request, SET, DiskPage_AIM, diskforcount, (i + 1));
+                    append_crc(&request);
+
+                    #if DebugToken
+                    printf("-----------------------------------DiskPage send %d times-----------------------------------\n",(i+1));
+                    printf("Diskpage Head: %x\n",request.header);
+                    printf("sequence %d\n",request.sequence);
+                    printf("lenth %d\n",request.length);
+                    printf("cmd %d\n",request.cmd);
+                    printf("aim %d\n",request.aim);
+                    printf("order %d\n",request.DiskPage_data.order);
+                    printf("total: %d\n \n",request.DiskPage_data.total);
+                    printf("diskcount %d\n",request.DiskPage_data.diskcount);
+                    printf("count: %d\n",request.DiskPage_data.count);
+                    printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[0].disklength);
+                    printf("Diskid: %d\n",request.DiskPage_data.diskStruct[0].disk_id);
+                    printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[0].unit);
+                    printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[0].total_size);
+                    printf("Diskused: %d\n",request.DiskPage_data.diskStruct[0].used_size);
+                    printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[0].temp);
+                    printf("Diskname: %s\n",request.DiskPage_data.diskStruct[0].name);
+                    if(pool_count-(i*2)>1)
+                    {
+                        printf("DiskLength: %d\n",request.DiskPage_data.diskStruct[1].disklength);
+                        printf("Diskid: %d\n",request.DiskPage_data.diskStruct[1].disk_id);
+                        printf("Diskunit: %d\n",request.DiskPage_data.diskStruct[1].unit);
+                        printf("Disktotal: %d\n",request.DiskPage_data.diskStruct[1].total_size);
+                        printf("Diskused: %d\n",request.DiskPage_data.diskStruct[1].used_size);
+                        printf("Disktemp: %d\n",request.DiskPage_data.diskStruct[1].temp);
+                        printf("Diskname: %s\n",request.DiskPage_data.diskStruct[1].name);
+                    }
+                    printf("CRC:%d\n",request.DiskPage_data.crc);
+                    printf("Send %d time\n",(i+1));
+                    #endif
+                            if (safe_usb_write(buffer, diskpage) == -1) {
+                    printf("Failed to write DiskPage data\n");
+                    break;
+                    }
+                    sleep(1);
+                    memset(buffer, 0x0, sizeof(unsigned char) * MAXLEN);
+                    memset(&request, 0x0, sizeof(Request));
+                }
+            }
+            else
+            {
+                
+            }
+            
+            #if DebugToken
+            printf("-----------------------------------DiskPage initial end-----------------------------------\n");
+            #endif
+            Isinitial = true;
+        }
+        TimeSleep1Sec();
+    }
+    printf("HID send thread exited\n");
+    return NULL;
+}
+void systemoperation(unsigned char cmd,unsigned char time)
+{
+    if (!allow_suspend) {
+        printf("Suspend blocked by runtime policy\n");
+        return;
+    }
+    char *command = NULL;
+    for (unsigned char i = 0; i < time; i++)
+    {
+        TimeSleep1Sec();
+    }
+    switch (cmd)
+    {
+    case HIBERNATEATONCE_AIM:
+        command = "systemctl suspend";
+        break;
+    
+    default:
+        break;
+    }
+    system(command);
+}
+// 从/proc/net/dev获取网络流量统计
+static int get_interface_stats_raw(const char *ifname, unsigned long long *rx_bytes, unsigned long long *tx_bytes) {
+    FILE *fp;
+    char line[512];
+    char iface[32];
+    
+    fp = fopen("/proc/net/dev", "r");
+    if (fp == NULL) {
+        printf("ERROR Failed to open /proc/net/dev: %s\n", strerror(errno));
+        return -1;
+    }
+    
+    // 跳过前两行标题
+    fgets(line, sizeof(line), fp);
+    fgets(line, sizeof(line), fp);
+    
+    *rx_bytes = 0;
+    *tx_bytes = 0;
+    
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        char *colon = strchr(line, ':');
+        if (colon == NULL) continue;
+        
+        // 提取接口名称
+        *colon = '\0';
+        strcpy(iface, line);
+        
+        // 移除前导空格
+        char *iface_name = iface;
+        while (*iface_name == ' ') iface_name++;
+        
+        if (strcmp(iface_name, ifname) == 0) {
+            // 解析接收和发送字节数
+            sscanf(colon + 1, "%llu %*u %*u %*u %*u %*u %*u %*u %llu",
+                   rx_bytes, tx_bytes);
+            fclose(fp);
+            return 0;
+        }
+    }
+    
+    fclose(fp);
+    return -1;
+}
+
+// 获取MAC地址
+static int get_interface_mac_address(const char *ifname, char *mac_addr) {
+    struct ifreq ifr;
+    int fd;
+    
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    
+    if (ioctl(fd, SIOCGIFHWADDR, &ifr) < 0) {
+        close(fd);
+        return -1;
+    }
+    
+    unsigned char *mac = (unsigned char *)ifr.ifr_hwaddr.sa_data;
+    snprintf(mac_addr, 18, "%02x:%02x:%02x:%02x:%02x:%02x",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    
+    close(fd);
+    return 0;
+}
+
+// 获取接口状态
+static int get_interface_status(const char *ifname, char *status) {
+    struct ifreq ifr;
+    int fd;
+    
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    
+    strncpy(ifr.ifr_name, ifname, IFNAMSIZ - 1);
+    
+    if (ioctl(fd, SIOCGIFFLAGS, &ifr) < 0) {
+        close(fd);
+        return -1;
+    }
+    
+    if (ifr.ifr_flags & IFF_UP) {
+        strcpy(status, "UP");
+    } else {
+        strcpy(status, "DOWN");
+    }
+    
+    if (ifr.ifr_flags & IFF_RUNNING) {
+        strcat(status, " (RUNNING)");
+    }
+    
+    close(fd);
+    return 0;
+}
+
+// 获取IP地址信息
+static void get_interface_ip_info(const char *ifname, network_interface_t *iface) {
+    struct ifaddrs *ifaddr, *ifa;
+    
+    strcpy(iface->ip_address, "0.0.0.0");
+    strcpy(iface->netmask, "0.0.0.0");
+    
+    if (getifaddrs(&ifaddr) == -1) {
+        return;
+    }
+    
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) continue;
+        if (strcmp(ifa->ifa_name, ifname) != 0) continue;
+        
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in *addr = (struct sockaddr_in *)ifa->ifa_addr;
+            struct sockaddr_in *netmask = (struct sockaddr_in *)ifa->ifa_netmask;
+            
+            char ip_str[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &addr->sin_addr, ip_str, INET_ADDRSTRLEN)) {
+                if (strcmp(ip_str, "0.0.0.0") != 0) {
+                    strncpy(iface->ip_address, ip_str, sizeof(iface->ip_address) - 1);
+                }
+            }
+            
+            if (netmask != NULL) {
+                char mask_str[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, &netmask->sin_addr, mask_str, INET_ADDRSTRLEN)) {
+                    strncpy(iface->netmask, mask_str, sizeof(iface->netmask) - 1);
+                }
+            }
+            
+            break;
+        }
+    }
+    
+    freeifaddrs(ifaddr);
+}
+
+// 在管理器中查找接口
+static network_interface_t* find_interface(const char *ifname) {
+    for (int i = 0; i < g_iface_manager.count; i++) {
+        if (strcmp(g_iface_manager.interfaces[i].interface_name, ifname) == 0) {
+            return &g_iface_manager.interfaces[i];
+        }
+    }
+    return NULL;
+}
+
+
+// 初始化网络监控系统
+int init_network_monitor() {
+    printf("INFO Initializing network monitor\n");
+    
+    // 初始分配8个接口的空间
+    g_iface_manager.capacity = 8;
+    g_iface_manager.interfaces = (network_interface_t*)malloc(
+        g_iface_manager.capacity * sizeof(network_interface_t));
+    
+    if (g_iface_manager.interfaces == NULL) {
+        printf("ERROR Failed to allocate memory for interfaces\n");
+        return -1;
+    }
+    
+    g_iface_manager.count = 0;
+    printf("INFO Network monitor initialized successfully\n");
+    return 0;
+}
+
+// 注册一个接口到监控系统
+int register_interface(const char *ifname) {
+    // 检查接口是否已注册
+    if (find_interface(ifname) != NULL) {
+        printf("WARNING Interface %s is already registered\n", ifname);
+        return 0; // 已存在，不算错误
+    }
+    
+    // 检查是否需要扩容
+    if (g_iface_manager.count >= g_iface_manager.capacity) {
+        int new_capacity = g_iface_manager.capacity * 2;
+        network_interface_t *new_interfaces = (network_interface_t*)realloc(
+            g_iface_manager.interfaces, new_capacity * sizeof(network_interface_t));
+        
+        if (new_interfaces == NULL) {
+            printf("ERROR Failed to expand interface array\n");
+            return -1;
+        }
+        
+        g_iface_manager.interfaces = new_interfaces;
+        g_iface_manager.capacity = new_capacity;
+    }
+    
+    // 初始化新接口
+    network_interface_t *iface = &g_iface_manager.interfaces[g_iface_manager.count];
+    memset(iface, 0, sizeof(network_interface_t));
+    strncpy(iface->interface_name, ifname, sizeof(iface->interface_name) - 1);
+    
+    // 获取静态信息
+    if (get_interface_status(ifname, iface->status) < 0) {
+        strcpy(iface->status, "UNKNOWN");
+    }
+    
+    if (get_interface_mac_address(ifname, iface->mac_address) < 0) {
+        strcpy(iface->mac_address, "00:00:00:00:00:00");
+    }
+    
+    get_interface_ip_info(ifname, iface);
+    
+    // 获取初始流量统计
+    if (get_interface_stats_raw(ifname, &iface->rx_bytes, &iface->tx_bytes) == 0) {
+        iface->rx_bytes_prev = iface->rx_bytes;
+        iface->tx_bytes_prev = iface->tx_bytes;
+        iface->initialized = 1;
+        time(&iface->last_update);
+        
+        // 计算初始总流量
+        iface->rx_total_mb = (double)iface->rx_bytes / (1024.0 * 1024.0);
+        iface->tx_total_mb = (double)iface->tx_bytes / (1024.0 * 1024.0);
+    } else {
+        printf("WARNING Failed to get initial stats for %s\n", ifname);
+        iface->initialized = 0;
+    }
+    
+    g_iface_manager.count++;
+    printf("INFO Registered interface: %s\n", ifname);
+    
+    return 0;
+}
+
+// 注册所有物理接口
+int register_all_physical_interfaces() {
+    struct ifaddrs *ifaddr, *ifa;
+    int registered_count = 0;
+    
+    if (getifaddrs(&ifaddr) == -1) {
+        printf("ERROR getifaddrs failed: %s\n", strerror(errno));
+        return 0;
+    }
+    
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) continue;
+        
+        const char *ifname = ifa->ifa_name;
+        
+        // 过滤条件
+        if (strcmp(ifname, "lo") == 0) continue;
+        if (strstr(ifname, "docker") != NULL) continue;
+        if (strstr(ifname, "veth") != NULL) continue;
+        if (strstr(ifname, "br-") != NULL) continue;
+        if (strstr(ifname, "virbr") != NULL) continue;
+        if (strstr(ifname, "tun") != NULL) continue;
+        if (strstr(ifname, "tap") != NULL) continue;
+        
+        // 检查是否已注册
+        if (find_interface(ifname) == NULL) {
+            if (register_interface(ifname) == 0) {
+                registered_count++;
+            }
+        }
+    }
+    
+    freeifaddrs(ifaddr);
+    printf("INFO Registered %d physical interfaces\n", registered_count);
+    return registered_count;
+}
+
+// 获取接口基本信息
+int get_interface_basic_info(const char *ifname, 
+                           char *status, 
+                           char *mac_addr,
+                           char *ip_addr,
+                           char *netmask) {
+    
+    // 不再从缓存中查找，直接实时获取
+    if (status) {
+        if (get_interface_status(ifname, status) < 0) {
+            strcpy(status, "UNKNOWN");
+        }
+    }
+    
+    if (mac_addr) {
+        if (get_interface_mac_address(ifname, mac_addr) < 0) {
+            strcpy(mac_addr, "00:00:00:00:00:00");
+        }
+    }
+    
+    if (ip_addr || netmask) {
+        // 临时结构体存储IP信息
+        network_interface_t temp_iface;
+        memset(&temp_iface, 0, sizeof(temp_iface));
+        strncpy(temp_iface.interface_name, ifname, sizeof(temp_iface.interface_name) - 1);
+        
+        get_interface_ip_info(ifname, &temp_iface);
+        
+        if (ip_addr) strcpy(ip_addr, temp_iface.ip_address);
+        if (netmask) strcpy(netmask, temp_iface.netmask);
+    }
+    
+    return 0;
+}
+
+// 主要API：获取接口流量信息
+int get_interface_traffic_info(const char *ifname,
+                             double *rx_speed_kb,
+                             double *tx_speed_kb,
+                             double *rx_total_mb,
+                             double *tx_total_mb) {
+    
+    network_interface_t *iface = find_interface(ifname);
+    if (iface == NULL) {
+        printf("ERROR Interface %s not registered\n", ifname);
+        return -1;
+    }
+    
+    // 获取当前流量统计
+    unsigned long long current_rx, current_tx;
+    if (get_interface_stats_raw(ifname, &current_rx, &current_tx) < 0) {
+        printf("WARNING Failed to get stats for %s\n", ifname);
+        return -1;
+    }
+    
+    time_t now;
+    time(&now);
+    
+    // 如果这是第一次获取，初始化
+    if (!iface->initialized) {
+        iface->rx_bytes = current_rx;
+        iface->tx_bytes = current_tx;
+        iface->rx_bytes_prev = current_rx;
+        iface->tx_bytes_prev = current_tx;
+        iface->last_update = now;
+        iface->initialized = 1;
+        
+        // 计算总流量
+        iface->rx_total_mb = (double)current_rx / (1024.0 * 1024.0);
+        iface->tx_total_mb = (double)current_tx / (1024.0 * 1024.0);
+        
+        // 速度初始为0
+        iface->rx_speed_kb = 0.0;
+        iface->tx_speed_kb = 0.0;
+    } else {
+        // 更新当前值
+        iface->rx_bytes = current_rx;
+        iface->tx_bytes = current_tx;
+        
+        // 计算时间差
+        double time_diff = difftime(now, iface->last_update);
+        
+        // 计算速度（处理时间差过小的情况）
+        if (time_diff > 0.1) {  // 至少0.1秒才有意义
+            // 检查计数器是否重置
+            unsigned long long rx_diff = (current_rx >= iface->rx_bytes_prev) ? 
+                                        (current_rx - iface->rx_bytes_prev) : current_rx;
+            unsigned long long tx_diff = (current_tx >= iface->tx_bytes_prev) ? 
+                                        (current_tx - iface->tx_bytes_prev) : current_tx;
+            
+            // 计算速度（KB/s）
+            iface->rx_speed_kb = (double)rx_diff / time_diff / 1024.0;
+            iface->tx_speed_kb = (double)tx_diff / time_diff / 1024.0;
+            
+            // 更新previous值
+            iface->rx_bytes_prev = current_rx;
+            iface->tx_bytes_prev = current_tx;
+        }
+        // 如果时间差太小，保持之前的速度值
+        
+        // 更新最后更新时间
+        iface->last_update = now;
+        
+        // 更新总流量
+        iface->rx_total_mb = (double)current_rx / (1024.0 * 1024.0);
+        iface->tx_total_mb = (double)current_tx / (1024.0 * 1024.0);
+    }
+    
+    // 返回结果
+    if (rx_speed_kb) *rx_speed_kb = iface->rx_speed_kb;
+    if (tx_speed_kb) *tx_speed_kb = iface->tx_speed_kb;
+    if (rx_total_mb) *rx_total_mb = iface->rx_total_mb;
+    if (tx_total_mb) *tx_total_mb = iface->tx_total_mb;
+    
+    return 0;
+}
+
+// 获取所有已注册的接口名称
+int get_registered_interfaces(char interfaces[][32], int max_interfaces) {
+    int count = 0;
+    
+    for (int i = 0; i < g_iface_manager.count && count < max_interfaces; i++) {
+        strncpy(interfaces[count], g_iface_manager.interfaces[i].interface_name, 31);
+        interfaces[count][31] = '\0';
+        count++;
+    }
+    
+    return count;
+}
+
+// 清理资源
+void cleanup_network_monitor() {
+    if (g_iface_manager.interfaces != NULL) {
+        free(g_iface_manager.interfaces);
+        g_iface_manager.interfaces = NULL;
+    }
+    g_iface_manager.count = 0;
+    g_iface_manager.capacity = 0;
+    printf("INFO Network monitor cleaned up\n");
+}
+
+// ========== 工具函数 ==========
+
+// 显示接口完整信息
+void display_interface_info(const char *ifname) {
+    // 添加 NULL 检查
+    if (ifname == NULL) {
+        printf("[ERROR] display_interface_info: ifname is NULL\n");
+        return;
+    }
+    
+    if (strlen(ifname) == 0) {
+        printf("[ERROR] display_interface_info: ifname is empty string\n");
+        return;
+    }
+    char status[16], mac[18], ip[INET_ADDRSTRLEN], mask[INET_ADDRSTRLEN];
+    double rx_speed = 0, tx_speed = 0, rx_total = 0, tx_total = 0;
+    
+    printf("\n=== Network Interface: %s ===\n", ifname);
+    
+    // 获取基本信息
+    if (get_interface_basic_info(ifname, status, mac, ip, mask) == 0) {
+        printf("Status:    %s\n", status);
+        printf("MAC:       %s\n", mac);
+        printf("IP:        %s\n", ip);
+        printf("Netmask:   %s\n", mask);
+    }
+    
+    // 获取流量信息
+    if (get_interface_traffic_info(ifname, &rx_speed, &tx_speed, &rx_total, &tx_total) == 0) {
+        printf("RX Speed:  %.2f KB/s\n", rx_speed);
+        printf("TX Speed:  %.2f KB/s\n", tx_speed);
+        printf("Total RX:  %.2f MB\n", rx_total);
+        printf("Total TX:  %.2f MB\n", tx_total);
+    }
+    
+    printf("===============================\n");
+}
+
+// 获取系统所有物理接口的总流量
+
+// 获取接口流量
+void monitor_interface_periodically(const char *ifname) {
+    double rx_speed, tx_speed, rx_total, tx_total;
+    
+    if (get_interface_traffic_info(ifname, &rx_speed, &tx_speed, &rx_total, &tx_total) == 0) {
+        printf("INFO %s - RX: %.2f KB/s, TX: %.2f KB/s, Total: RX=%.2f MB, TX=%.2f MB\n",
+                   ifname, rx_speed, tx_speed, rx_total, tx_total);
+    }
+}
+
+// 获取所有接口的流量信息
+void monitor_all_interfaces() {
+    char interfaces[10][32];
+    int count = get_registered_interfaces(interfaces, 10);
+    
+    for (int i = 0; i < count; i++) {
+        monitor_interface_periodically(interfaces[i]);
+    }
+}
+
+void get_system_info(system_info_t *info) {
+    // 设备名称（主机名）
+    gethostname(info->devicename, sizeof(info->devicename));
+    
+    // 处理器信息
+    FILE *cpuinfo = fopen("/proc/cpuinfo", "r");
+    if (cpuinfo) {
+        char line[256];
+        while (fgets(line, sizeof(line), cpuinfo)) {
+            if (strstr(line, "model name")) {
+                char *colon = strchr(line, ':');
+                if (colon) {
+                    strcpy(info->cpuname, colon + 2);
+                    info->cpuname[strcspn(info->cpuname, "\n")] = 0;
+                    break;
+                }
+            }
+        }
+        fclose(cpuinfo);
+    }
+    
+    // 操作系统信息
+    FILE *os_release = fopen("/etc/os-release", "r");
+    if (os_release) {
+        char line[256];
+        while (fgets(line, sizeof(line), os_release)) {
+            if (strstr(line, "PRETTY_NAME")) {
+                char *start = strchr(line, '"') + 1;
+                char *end = strrchr(line, '"');
+                if (start && end) {
+                    strncpy(info->operatename, start, end - start);
+                    info->operatename[end - start] = '\0';
+                    break;
+                }
+            }
+        }
+        fclose(os_release);
+    }
+    
+    // 序列号
+    FILE *serial_file = fopen("/sys/class/dmi/id/product_serial", "r");
+    if (serial_file) {
+        fgets(info->serial_number, sizeof(info->serial_number), serial_file);
+        info->serial_number[strcspn(info->serial_number, "\n")] = 0;
+        fclose(serial_file);
+    } else {
+        strcpy(info->serial_number, "Not Available");
+    }
+}

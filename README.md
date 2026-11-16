@@ -1,4 +1,11 @@
-## Installation
+# HarborNAS status display
+
+Choose the installation guide for your operating system:
+
+- **Unraid 7.4.0 on Nexus / NAS-N1:** [English installation guide and test release](unraid/README.md). This build provides a version-pinned `curl` installer, keeps EC writes and firmware updates disabled, and uses manual startup.
+- **HarborOS / Debian / Ubuntu:** use the instructions below.
+
+## HarborOS / Debian / Ubuntu installation
 
 For easy installation on Debian/Ubuntu systems, run:
 
