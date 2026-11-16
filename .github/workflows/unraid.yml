@@ -1,0 +1,66 @@
+name: Unraid build and installer tests
+
+on:
+  push:
+    branches: [main, 'codex/**']
+    tags: ['unraid-v*']
+    paths:
+      - 'unraid/**'
+      - 'protocol.h'
+      - '.github/workflows/unraid.yml'
+  pull_request:
+    paths:
+      - 'unraid/**'
+      - 'protocol.h'
+      - '.github/workflows/unraid.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unraid-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y build-essential libusb-1.0-0-dev
+      - name: Check shell syntax
+        run: |
+          for script in unraid/install.sh unraid/package.sh unraid/preflight.sh unraid/rc.harboros-subscreen.example unraid/tests/installer_test.sh; do
+            bash -n "$script"
+          done
+      - name: Build and test EC permission handling
+        run: make -f unraid/Makefile all test
+      - name: Test installer validation and lifecycle
+        run: bash unraid/tests/installer_test.sh
+      - name: Package and check deterministic output
+        run: |
+          export VERSION=unraid-v0.1.0-test.1
+          if [[ "$GITHUB_REF" == refs/tags/unraid-v* ]]; then
+            export VERSION="$GITHUB_REF_NAME"
+          fi
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          bash unraid/package.sh
+          cp "dist/harboros-subscreen-${VERSION}-x86_64.tgz.sha256" "$RUNNER_TEMP/first.sha256"
+          bash unraid/package.sh
+          cmp "$RUNNER_TEMP/first.sha256" "dist/harboros-subscreen-${VERSION}-x86_64.tgz.sha256"
+          cd dist
+          sha256sum -c "harboros-subscreen-${VERSION}-x86_64.tgz.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: unraid-x86_64-test-package
+          path: |
+            dist/*.tgz
+            dist/*.tgz.sha256
+          if-no-files-found: error
+          retention-days: 14
